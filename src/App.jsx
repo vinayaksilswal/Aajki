@@ -23,7 +23,7 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <Link to="/" className="logo" style={{ textDecoration: 'none', color: 'inherit' }}>
-          <span className="dot">K</span> Aajki
+          <span className="dot">A</span> Aajki
         </Link>
         <span className="coin-pill"><span className="c">◎</span> {balance ?? 0}</span>
       </header>
