@@ -13,6 +13,16 @@ Vercel domain can't call it directly. Everything goes through `/api/aajki/*` on 
 
 See [`ENDPOINTS.md`](./ENDPOINTS.md) for the full reverse-engineered API reference.
 
+## Two backend options
+
+1. **Node proxy** (`server/`) — forwards to the real Kalki API. Default; good for live data.
+2. **Python backend** (`backend-python/`) — a **standalone** FastAPI backend that serves the
+   same API from its **own seed data**, with no Kalki dependency. This is the "our own
+   backend" step. See [`backend-python/README.md`](./backend-python/README.md).
+
+The frontend picks its backend from one env var: set **`VITE_API_BASE`** to the Python
+backend's URL to run fully independent of Kalki; leave it unset to use the Node proxy.
+
 ## Architecture
 
 ```

@@ -19,9 +19,11 @@ export async function apiFetch(path, { method = 'GET', body, auth = true, header
   if (auth && token) h['Authorization'] = `Bearer ${token}`;
   if (body !== undefined) h['Content-Type'] = 'application/json';
 
-  // All Aajki calls go through our own backend proxy (/api/aajki), so the app works on
-  // Vercel where the browser can't reach app.getkalki.com directly (no CORS).
-  const res = await fetch(`/api/aajki${path}`, {
+  // Where the API lives:
+  //  - VITE_API_BASE set (e.g. your Python backend URL) -> call it directly (it sends CORS).
+  //  - otherwise fall back to the same-origin Node proxy at /api/aajki (which forwards to Kalki).
+  const base = import.meta.env.VITE_API_BASE || '/api/aajki';
+  const res = await fetch(`${base}${path}`, {
     method,
     headers: h,
     body: body !== undefined ? JSON.stringify(body) : undefined,

@@ -4,3 +4,9 @@ dist/
 .vercel/
 .env
 .env.local
+
+# python
+__pycache__/
+*.pyc
+.venv/
+backend-python/__pycache__/
