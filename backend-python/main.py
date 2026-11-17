@@ -37,6 +37,16 @@ app.add_middleware(
 )
 
 
+# Accept both same-origin calls (/v2/...) and the default proxy path (/api/aajki/v2/...),
+# so the frontend works here no matter which API base it was built with.
+@app.middleware("http")
+async def _strip_proxy_prefix(request: Request, call_next):
+    p = request.scope.get("path", "")
+    if p.startswith("/api/aajki/"):
+        request.scope["path"] = p[len("/api/aajki"):]
+    return await call_next(request)
+
+
 def _not_found(msg="Not found."):
     return JSONResponse(
         {"code": "NOT_FOUND", "http_status": 404, "message": msg,
