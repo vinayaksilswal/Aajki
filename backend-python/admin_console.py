@@ -104,9 +104,9 @@ def _question_form(action, topics, poll=None) -> str:
     kind = poll.get("display_kind", "binary")
     opts_text = _options_text(poll.get("options", [])) if poll.get("display_kind") == "multi" else ""
     return f"""<form method="post" action="{action}">
-      <label>Question</label><textarea name="question" required>{esc(poll.get("question",""))}</textarea>
+      <label>Question</label><textarea name="question" id="q_input" required>{esc(poll.get("question",""))}</textarea>
       <div class="row">
-        <div><label>Category</label><select name="category">{cat_opts}</select></div>
+        <div><label>Category</label><select name="category" id="q_cat">{cat_opts}</select></div>
         <div><label>Topic</label><select name="topic_id">{topt}</select></div>
       </div>
       <div class="row3">
@@ -137,9 +137,42 @@ def page_questions(polls, topics, stats) -> str:
                  f'</div></td></tr>')
     body = (f'<h1>Questions</h1><div class="statline">{len(polls)} total</div>'
             f'<div class="card" id="new"><h2>New question</h2>{_question_form("/admin/questions/new", topics)}</div>'
+            f'<div class="card"><h2>📰 Latest from Google News <span class="muted" style="font-weight:400;font-size:.8rem">— click a headline to draft a question from it</span></h2>'
+            f'<div id="newsfeed"><p class="muted">Loading headlines…</p></div></div>'
             f'<div class="card"><h2>All questions</h2><table><thead><tr><th>Question</th><th>Category</th><th>Votes</th><th>Comments</th><th>Status</th><th>Actions</th></tr></thead>'
-            f'<tbody>{rows}</tbody></table></div>')
+            f'<tbody>{rows}</tbody></table></div>'
+            f'{_NEWS_SCRIPT}')
     return layout("questions", body, stats)
+
+
+# Loads the cached Google News headlines and lets a click pre-fill the New Question form.
+_NEWS_SCRIPT = """<script>
+(async function(){
+  var box=document.getElementById('newsfeed');
+  function draft(title,cat){
+    var q=document.getElementById('q_input'); var c=document.getElementById('q_cat');
+    if(q){q.value=title; q.focus();}
+    if(c){for(var i=0;i<c.options.length;i++){if(c.options[i].value===cat||c.options[i].text===cat){c.selectedIndex=i;break;}}}
+    document.getElementById('new').scrollIntoView({behavior:'smooth'});
+  }
+  try{
+    var r=await fetch(location.origin+'/admin/news-feed'); var data=await r.json();
+    var html=''; var any=false;
+    for(var cat in data){ var items=data[cat]||[]; if(!items.length) continue; any=true;
+      html+='<div style="margin-bottom:12px"><div style="text-transform:capitalize;color:var(--muted);font-size:.74rem;font-weight:700;letter-spacing:.05em;margin-bottom:4px">'+cat+'</div>';
+      items.forEach(function(it){
+        html+='<div style="display:flex;gap:8px;align-items:start;padding:5px 0;border-bottom:1px solid var(--line)">'
+          +'<button type="button" class="btn ghost sm" style="flex:none">Draft</button>'
+          +'<span>'+it.title.replace(/</g,'&lt;')+' <span class="muted" style="font-size:.72rem">— '+(it.source||'').replace(/</g,'&lt;')+'</span></span></div>';
+      });
+      html+='</div>';
+    }
+    box.innerHTML=any?html:'<p class="muted">No headlines right now (Google News may be rate-limiting). Refresh in a minute.</p>';
+    var btns=box.querySelectorAll('button'); var flat=[]; for(var cat in data){(data[cat]||[]).forEach(function(it){flat.push([it.title,cat]);});}
+    btns.forEach(function(b,i){ b.addEventListener('click',function(){draft(flat[i][0],flat[i][1]);}); });
+  }catch(e){ box.innerHTML='<p class="muted">Couldn\\'t load news right now.</p>'; }
+})();
+</script>"""
 
 
 def page_edit_question(poll, topics, stats) -> str:

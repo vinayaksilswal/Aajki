@@ -372,6 +372,14 @@ def _fetch_news():
     return _NEWS_CACHE["data"]
 
 
+@app.get("/admin/news-feed", dependencies=A)
+def admin_news_feed():
+    # Cached headlines as JSON, used by the Questions page's "draft from news" panel.
+    data = _fetch_news()
+    return {cat: [{"title": it["title"], "source": it["source"], "link": it["link"]}
+                  for it in items] for cat, items in data.items()}
+
+
 @app.get("/admin/news", response_class=HTMLResponse, dependencies=A)
 def admin_news():
     data = _fetch_news()
