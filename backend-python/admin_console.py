@@ -4,9 +4,8 @@ topics, comments, audience). All data comes from the DB via store.py.
 from __future__ import annotations
 
 import html
+import math
 from datetime import datetime
-
-from admin import render_admin as _sentiment_cards_page  # reused for the analytics view
 
 NAV = [
     ("dashboard", "Dashboard", "◧"),
@@ -195,13 +194,95 @@ def page_audience(users, stats) -> str:
     return layout("audience", body, stats)
 
 
+def _mood_color(m) -> str:
+    return "#1f9d55" if m > 0.15 else "#d14343" if m < -0.15 else "#e3b32a"
+
+
+def _signed(x) -> str:
+    x = x or 0
+    return f"{'+' if x > 0 else ''}{x:.2f}"
+
+
+def speedometer(value: float, caption: str, lo: float = -1.0, hi: float = 1.0) -> str:
+    """A semicircular speedometer gauge (inline SVG, self-contained)."""
+    frac = max(0.0, min(1.0, (value - lo) / (hi - lo)))
+    cx, cy, r = 110.0, 110.0, 92.0
+    ang = math.radians(180.0 * (1.0 - frac))           # 180°(lo, left) .. 0°(hi, right)
+    nx, ny = cx + r * 0.80 * math.cos(ang), cy - r * 0.80 * math.sin(ang)
+    lx, ly = cx - r, cy                                # arc start (left)
+    rx, ry = cx + r, cy                                # arc end (right)
+    col = _mood_color(value)
+    # tick at the zero mark (centre)
+    zx, zy = cx, cy - r
+    return f"""<svg viewBox="0 0 220 136" width="100%" style="max-width:300px">
+  <defs><linearGradient id="gm{abs(hash(caption))%9999}" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0" stop-color="#d14343"/><stop offset="0.5" stop-color="#e3b32a"/><stop offset="1" stop-color="#1f9d55"/>
+  </linearGradient></defs>
+  <path d="M {lx} {ly} A {r} {r} 0 0 1 {rx} {ry}" fill="none" stroke="url(#gm{abs(hash(caption))%9999})" stroke-width="16" stroke-linecap="round"/>
+  <line x1="{cx}" y1="{cy-r-4:.0f}" x2="{cx}" y2="{cy-r+14:.0f}" stroke="#0f1115" stroke-width="3"/>
+  <line x1="{cx}" y1="{cy}" x2="{nx:.1f}" y2="{ny:.1f}" stroke="{col}" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="{cx}" cy="{cy}" r="9" fill="{col}"/>
+  <text x="{lx}" y="{cy+20:.0f}" fill="#8b93a1" font-size="11" text-anchor="middle">−1</text>
+  <text x="{zx}" y="{zy-6:.0f}" fill="#8b93a1" font-size="11" text-anchor="middle">0</text>
+  <text x="{rx}" y="{cy+20:.0f}" fill="#8b93a1" font-size="11" text-anchor="middle">+1</text>
+  <text x="{cx}" y="{cy-16:.0f}" fill="{col}" font-size="30" font-weight="800" text-anchor="middle">{_signed(value)}</text>
+  <text x="{cx}" y="{cy+6:.0f}" fill="#8b93a1" font-size="11" text-anchor="middle">{esc(caption)}</text>
+</svg>"""
+
+
+def _dist_bar(d) -> str:
+    total = (d["positive"] + d["neutral"] + d["negative"]) or 1
+    def seg(n, c, lbl):
+        w = n / total * 100
+        return f'<div style="width:{w:.1f}%;background:{c}" title="{lbl}: {n}"></div>'
+    return (f'<div style="display:flex;height:16px;border-radius:999px;overflow:hidden;margin-top:6px">'
+            f'{seg(d["positive"], "#1f9d55", "positive")}{seg(d["neutral"], "#e3b32a", "neutral")}{seg(d["negative"], "#d14343", "negative")}</div>'
+            f'<div style="display:flex;gap:16px;margin-top:8px;font-size:.8rem;color:var(--muted)">'
+            f'<span>● {d["positive"]} positive</span><span>● {d["neutral"]} neutral</span><span>● {d["negative"]} negative</span></div>')
+
+
+def _cat_table(categories) -> str:
+    rows = ""
+    for c in categories:
+        opt = _signed(c["optimism"]) if c["optimism"] == c["optimism"] else "—"
+        rows += (f'<tr><td><strong>{esc(c["category"])}</strong></td><td>{c["count"]}</td>'
+                 f'<td style="color:{_mood_color(c["mood"])}">{_signed(c["mood"])}</td><td>{opt}</td>'
+                 f'<td>{round(c["consensus"]*100)}%</td><td>{c["total_votes"]:,}</td>'
+                 f'<td><span class="pill open">{c["positive"]}</span> <span class="pill" style="background:rgba(201,162,39,.18);color:#e3c45a">{c["neutral"]}</span> <span class="pill closed">{c["negative"]}</span></td></tr>')
+    return (f'<table><thead><tr><th>Category</th><th>Polls</th><th>Mood</th><th>Optimism</th>'
+            f'<th>Consensus</th><th>Votes</th><th>Breakdown</th></tr></thead><tbody>{rows}</tbody></table>')
+
+
+def _poll_list(items, kind) -> str:
+    if not items:
+        return '<p class="muted">No data.</p>'
+    out = ""
+    for r in items:
+        if kind == "divisive":
+            detail = f'consensus {round(r["crowd"]["consensus"]*100)}%'
+        elif kind == "engaged":
+            detail = f'{r["engagement"]:,} engagement'
+        else:
+            detail = f'mood {_signed(r["mood"])}'
+        out += (f'<li style="display:flex;gap:9px;padding:9px 0;border-bottom:1px solid var(--line)">'
+                f'<span style="width:9px;height:9px;border-radius:50%;background:{_mood_color(r["mood"])};margin-top:5px;flex:none"></span>'
+                f'<span>{esc(r["question"])}<div class="muted" style="font-size:.74rem">{esc(r["category"])} · {detail} · {r["crowd"]["total_votes"]} votes</div></span></li>')
+    return f'<ul style="list-style:none;margin:0;padding:0">{out}</ul>'
+
+
 def page_sentiment(sentiment_model, stats) -> str:
-    # Embed the existing sentiment cards inside the console layout.
-    inner = _sentiment_cards_page(sentiment_model)
-    start = inner.find("<body>") + len("<body>")
-    end = inner.find("</body>")
-    cards = inner[start:end].replace('<div class="wrap">', '<div>').replace("</div>\n<script", "</div><script")
-    # strip the auto-reload script and outer title to fit the console
-    cards = cards.split("<script")[0]
-    body = f'<h1>Sentiment</h1><div class="statline">Public mood, computed from your data</div>{cards}'
+    m = sentiment_model
+    body = (
+        f'<h1>Sentiment</h1><div class="statline">Public mood, computed server-side from {m["total_polls"]} questions · {m["total_votes"]:,} votes</div>'
+        f'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-bottom:18px">'
+        f'<div class="card" style="text-align:center"><h2>Overall mood</h2>{speedometer(m["overall_mood"], "mood")}</div>'
+        f'<div class="card" style="text-align:center"><h2>Crowd optimism</h2>{speedometer(m["overall_optimism"], "net yes-lean")}</div>'
+        f'<div class="card"><h2>Mood distribution</h2>{_dist_bar(m["distribution"])}</div></div>'
+        f'<div class="card"><h2>By category</h2>{_cat_table(m["categories"])}</div>'
+        f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">'
+        f'<div class="card"><h2>Most positive framing</h2>{_poll_list(m["most_positive"], "mood")}</div>'
+        f'<div class="card"><h2>Most negative framing</h2>{_poll_list(m["most_negative"], "mood")}</div>'
+        f'<div class="card"><h2>Most divisive</h2>{_poll_list(m["most_divisive"], "divisive")}</div>'
+        f'<div class="card"><h2>Most engaged</h2>{_poll_list(m["most_engaged"], "engaged")}</div></div>'
+    )
     return layout("sentiment", body, stats)

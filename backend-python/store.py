@@ -433,3 +433,23 @@ def admin_stats():
         comments = s.scalar(select(func.count()).select_from(Comment)) or 0
         return {"polls": polls, "open_polls": open_polls, "topics": topics, "users": users,
                 "blocked": blocked, "votes": votes, "comments": comments}
+
+
+def add_comment(poll_id: str, body: str, user_id=None, author_name="User"):
+    body = (body or "").strip()[:1000]
+    if not body:
+        return None
+    with SessionLocal() as s:
+        if not s.get(Poll, poll_id):
+            return None
+        name = author_name
+        if user_id:
+            u = s.get(User, user_id)
+            if u:
+                if u.blocked:
+                    return False
+                name = u.display_name
+        c = Comment(poll_id=poll_id, user_id=user_id, author_name=name, body=body)
+        s.add(c); s.commit()
+        return {"id": c.id, "author": {"name": c.author_name}, "body": c.body,
+                "published_time": "just now", "vote_count": 0}

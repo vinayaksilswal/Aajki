@@ -97,6 +97,20 @@ def poll_comments(poll_id: str):
     return store.poll_comments(poll_id)
 
 
+@app.post("/v2/polls/{poll_id}/comments")
+async def poll_comment_add(poll_id: str, request: Request):
+    body = await _json(request)
+    text = (body or {}).get("body") or (body or {}).get("text") or ""
+    user = _auth_user(request)
+    author = (body or {}).get("author") or "Guest"
+    result = store.add_comment(poll_id, text, user_id=(user["id"] if user else None), author_name=author)
+    if result is False:
+        return JSONResponse({"code": "FORBIDDEN", "http_status": 403, "message": "Account blocked."}, status_code=403)
+    if not result:
+        return _nf("Poll not found or empty comment.")
+    return result
+
+
 @app.post("/v2/polls/{poll_id}/vote")
 async def poll_vote(poll_id: str, request: Request):
     body = await _json(request)
@@ -195,9 +209,19 @@ def admin_guard(request: Request):
 
 A = [Depends(admin_guard)]
 
+# Cache the sentiment model briefly so repeated admin loads / real traffic don't re-scan
+# every poll and vote on each request. Per-instance cache; fine for serverless.
+_SENT_CACHE = {"at": 0.0, "model": None}
+_SENT_TTL = float(os.environ.get("SENTIMENT_TTL_S", "60"))
+
 
 def _sentiment_model():
-    return sent.analyze_set(store.all_polls_for_sentiment())
+    import time
+    now = time.time()
+    if _SENT_CACHE["model"] is None or now - _SENT_CACHE["at"] > _SENT_TTL:
+        _SENT_CACHE["model"] = sent.analyze_set(store.all_polls_for_sentiment())
+        _SENT_CACHE["at"] = now
+    return _SENT_CACHE["model"]
 
 
 @app.get("/admin", dependencies=A)

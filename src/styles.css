@@ -149,3 +149,10 @@ img.cover { display: block; width: 100%; height: 180px; object-fit: cover; borde
 /* Tile with image acts as a link card */
 a.tile { transition: border-color .15s; }
 a.tile:active { border-color: var(--accent); }
+
+/* Comment form */
+.comment-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.comment-form textarea { width: 100%; background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 11px; padding: 11px 13px; color: var(--text); font: inherit; resize: vertical; }
+.comment-form textarea:focus { outline: none; border-color: var(--accent); }
+.comment-form .btn { align-self: flex-end; width: auto; padding: 8px 18px; }

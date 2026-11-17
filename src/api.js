@@ -60,6 +60,7 @@ export const api = {
   topic: (id) => apiFetch(`/v2/polls/topics/${id}`, { auth: false }),
   poll: (id) => apiFetch(`/v2/polls/${id}`, { auth: false }),
   pollComments: (id) => apiFetch(`/v2/polls/${id}/comments`, { auth: false }),
+  addComment: (id, body, author) => apiFetch(`/v2/polls/${id}/comments`, { method: 'POST', body: { body, author } }),
   storiesDaily: (cursor) => apiFetch(`/v2/stories/daily${cursor ? `?cursor=${cursor}` : ''}`, { auth: false }),
   leaderboards: () => apiFetch('/v2/leaderboards', { auth: false }),
   board: (id) => apiFetch(`/v2/leaderboards/${id}`, { auth: false }),
