@@ -1,10 +1,17 @@
 # Aajki backend (Python / FastAPI)
 
-A **standalone** backend that serves the same API the frontend expects, from its **own seed
-data** — no calls to Kalki or any external service. It also hosts the sentiment admin portal.
+A **standalone**, database-backed backend that serves the app's API **and** a full
+**admin management console**. No calls to Kalki or any external service.
 
-This is the "our own backend" step: point the frontend at this and the app runs entirely on
-your own infrastructure.
+- **Database:** set `DATABASE_URL` (Postgres/MySQL/SQLite). Tables are created and seeded
+  automatically on first run. With no `DATABASE_URL` it uses a local SQLite file for dev.
+- **Admin console** at `/admin` (Basic Auth): dashboard, create/edit/close/delete
+  **questions**, manage **topics**, moderate **comments**, view the **audience** (users),
+  **block/unblock** users, and a **sentiment** analytics page. Changes are live immediately
+  in the app.
+
+Modules: `db.py` (engine), `models.py` (ORM), `store.py` (queries + serialization),
+`admin_console.py` (admin UI), `main.py` (routes), `seed.py` (initial sample content).
 
 ## What it serves
 
