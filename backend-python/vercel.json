@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "builds": [{ "src": "main.py", "use": "@vercel/python" }],
-  "routes": [{ "src": "/(.*)", "dest": "main.py" }]
+  "routes": [{ "src": "/(.*)", "dest": "main.py" }],
+  "crons": [{ "path": "/api/cron/news-import", "schedule": "0 6 * * *" }]
 }

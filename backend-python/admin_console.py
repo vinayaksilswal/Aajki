@@ -10,6 +10,7 @@ from datetime import datetime
 NAV = [
     ("dashboard", "Dashboard", "◧"),
     ("questions", "Questions", "▣"),
+    ("news", "News", "📰"),
     ("topics", "Topics", "◆"),
     ("comments", "Comments", "✎"),
     ("audience", "Audience", "◉"),
@@ -286,3 +287,33 @@ def page_sentiment(sentiment_model, stats) -> str:
         f'<div class="card"><h2>Most engaged</h2>{_poll_list(m["most_engaged"], "engaged")}</div></div>'
     )
     return layout("sentiment", body, stats)
+
+
+def page_news(news_by_cat: dict, imported: set, stats) -> str:
+    sections = ""
+    total = sum(len(v) for v in news_by_cat.values())
+    for cat, items in news_by_cat.items():
+        if not items:
+            continue
+        rows = ""
+        for it in items:
+            done = it["title"] in imported
+            fields = (f'<input type="hidden" name="title" value="{esc(it["title"])}">'
+                      f'<input type="hidden" name="category" value="{esc(cat)}">'
+                      f'<input type="hidden" name="source" value="{esc(it["source"])}">'
+                      f'<input type="hidden" name="link" value="{esc(it["link"])}">')
+            action = ('<span class="pill open">✓ published</span>' if done else
+                      f'<form class="inline" method="post" action="/admin/news/publish">{fields}<button class="btn sm">Publish</button></form>')
+            rows += (f'<tr><td>{esc(it["title"])}<div class="muted" style="font-size:.74rem">{esc(it["source"])}</div></td>'
+                     f'<td style="white-space:nowrap">{action}</td></tr>')
+        sections += (f'<div class="card"><h2 style="text-transform:capitalize">{esc(cat)} '
+                     f'<form class="inline" method="post" action="/admin/news/import" style="float:right">'
+                     f'<input type="hidden" name="category" value="{esc(cat)}"><button class="btn ghost sm">Publish all new</button></form></h2>'
+                     f'<table><tbody>{rows}</tbody></table></div>')
+    body = (f'<h1>News</h1><div class="statline">Live headlines from Google News · {total} fetched · '
+            f'publish any as a “Good news / Bad news” poll</div>'
+            f'<div class="card"><form method="post" action="/admin/news/import"><input type="hidden" name="category" value="all">'
+            f'<button class="btn">⚡ Auto-import latest from every category</button> '
+            f'<span class="muted" style="margin-left:10px">Creates reaction polls from the newest headlines (skips duplicates).</span></form></div>'
+            f'{sections or "<div class=card><p class=muted>No headlines fetched right now — Google News may be rate-limiting. Try again shortly.</p></div>"}')
+    return layout("news", body, stats)

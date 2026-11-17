@@ -453,3 +453,25 @@ def add_comment(poll_id: str, body: str, user_id=None, author_name="User"):
         s.add(c); s.commit()
         return {"id": c.id, "author": {"name": c.author_name}, "body": c.body,
                 "published_time": "just now", "vote_count": 0}
+
+
+def question_exists(question: str) -> bool:
+    q = (question or "").strip()
+    with SessionLocal() as s:
+        return s.scalar(select(func.count()).select_from(Poll).where(Poll.question == q)) > 0
+
+
+def create_poll_if_new(args: dict):
+    """Create a poll unless one with the same question already exists. Returns id or None."""
+    if not args.get("question") or question_exists(args["question"]):
+        return None
+    return admin_create_poll(**args)
+
+
+def existing_questions(questions: list[str]) -> set:
+    qs = [q for q in questions if q]
+    if not qs:
+        return set()
+    with SessionLocal() as s:
+        rows = s.scalars(select(Poll.question).where(Poll.question.in_(qs))).all()
+    return set(rows)

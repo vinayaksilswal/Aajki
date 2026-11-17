@@ -7,8 +7,17 @@ A **standalone**, database-backed backend that serves the app's API **and** a fu
   automatically on first run. With no `DATABASE_URL` it uses a local SQLite file for dev.
 - **Admin console** at `/admin` (Basic Auth): dashboard, create/edit/close/delete
   **questions**, manage **topics**, moderate **comments**, view the **audience** (users),
-  **block/unblock** users, and a **sentiment** analytics page. Changes are live immediately
-  in the app.
+  **block/unblock** users, a **sentiment** analytics page (speedometer gauges), and a
+  **News** page that pulls live **Google News** headlines and turns them into
+  "Good news / Bad news" reaction polls. Changes are live immediately in the app.
+
+### Auto-importing news
+
+`/admin/news` fetches current Google News headlines (free RSS, no key) per category and
+lets you publish any (or all) as polls. For hands-off operation, a scheduler can hit
+`GET /api/cron/news-import` with `Authorization: Bearer $CRON_SECRET`. The backend's
+`vercel.json` already declares a daily Vercel Cron for it — set a `CRON_SECRET` env var in
+the project to enable it. (Google News rate-limits by IP; results are cached 5 min.)
 
 Modules: `db.py` (engine), `models.py` (ORM), `store.py` (queries + serialization),
 `admin_console.py` (admin UI), `main.py` (routes), `seed.py` (initial sample content).

@@ -19,10 +19,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+import time
+
 import store
 import sentiment as sent
 import admin_console as console
-from admin import render_admin
+import news
 
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
@@ -355,6 +357,72 @@ def admin_sentiment_page():
 @app.get("/api/admin/sentiment", dependencies=A)
 def admin_sentiment_json():
     return _sentiment_model()
+
+
+# --- News ingestion (Google News -> reaction polls) ---
+_NEWS_CACHE = {"at": 0.0, "data": None}
+_NEWS_TTL = float(os.environ.get("NEWS_TTL_S", "300"))
+
+
+def _fetch_news():
+    now = time.time()
+    if _NEWS_CACHE["data"] is None or now - _NEWS_CACHE["at"] > _NEWS_TTL:
+        _NEWS_CACHE["data"] = news.fetch_all(limit_per_category=8)
+        _NEWS_CACHE["at"] = now
+    return _NEWS_CACHE["data"]
+
+
+@app.get("/admin/news", response_class=HTMLResponse, dependencies=A)
+def admin_news():
+    data = _fetch_news()
+    titles = [it["title"] for items in data.values() for it in items]
+    imported = store.existing_questions(titles)
+    return console.page_news(data, imported, store.admin_stats())
+
+
+@app.post("/admin/news/publish", dependencies=A)
+async def admin_news_publish(request: Request):
+    f = await request.form()
+    item = {"title": f.get("title", ""), "category": f.get("category", "politics"),
+            "source": f.get("source", "Google News"), "link": f.get("link", "")}
+    if item["title"]:
+        store.create_poll_if_new(news.to_poll(item))
+    return RedirectResponse("/admin/news", status_code=303)
+
+
+def _import_latest() -> int:
+    data = news.fetch_all(limit_per_category=8)
+    _NEWS_CACHE["data"], _NEWS_CACHE["at"] = data, time.time()
+    created = 0
+    for items in data.values():
+        for it in items:
+            if store.create_poll_if_new(news.to_poll(it)):
+                created += 1
+    return created
+
+
+@app.post("/admin/news/import", dependencies=A)
+async def admin_news_import(request: Request):
+    f = await request.form()
+    cat = f.get("category", "all")
+    if cat == "all":
+        _import_latest()
+    else:
+        data = _fetch_news()
+        for it in data.get(cat, []):
+            store.create_poll_if_new(news.to_poll(it))
+    return RedirectResponse("/admin/news", status_code=303)
+
+
+# Hands-off auto-import for a scheduler (e.g. Vercel Cron). Protected by CRON_SECRET:
+# Vercel sends `Authorization: Bearer $CRON_SECRET` with scheduled requests.
+@app.get("/api/cron/news-import")
+def cron_news_import(request: Request):
+    secret = os.environ.get("CRON_SECRET", "")
+    if not secret or request.headers.get("authorization") != f"Bearer {secret}":
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    created = _import_latest()
+    return {"ok": True, "created": created, "at": datetime.now(timezone.utc).isoformat()}
 
 
 async def _json(req: Request):
