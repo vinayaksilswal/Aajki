@@ -22,7 +22,10 @@ export async function apiFetch(path, { method = 'GET', body, auth = true, header
   // Where the API lives:
   //  - VITE_API_BASE set (e.g. your Python backend URL) -> call it directly (it sends CORS).
   //  - otherwise fall back to the same-origin Node proxy at /api/aajki (which forwards to Kalki).
-  const base = import.meta.env.VITE_API_BASE || '/api/aajki';
+  // '' (empty) = same-origin, call /v2/... directly (e.g. when the Python backend also
+  // serves this frontend). undefined = default to the Node proxy. Absolute URL = that host.
+  const configured = import.meta.env.VITE_API_BASE;
+  const base = configured == null ? '/api/aajki' : configured;
   const res = await fetch(`${base}${path}`, {
     method,
     headers: h,

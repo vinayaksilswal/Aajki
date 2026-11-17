@@ -12,9 +12,12 @@ import os
 import secrets
 from datetime import datetime, timezone
 
+import os.path as _osp
+
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
 import seed
 import sentiment as sent
@@ -258,3 +261,11 @@ async def _json(req: Request):
         return await req.json()
     except Exception:
         return {}
+
+
+# --- Serve the built frontend from the same origin (so phones hit one URL, no CORS) --------
+# Build the frontend first (npm run build) so ../dist exists. Mounted LAST so the API routes
+# above always win. With the frontend built using VITE_API_BASE="" it calls /v2/... here.
+_DIST = _osp.join(_osp.dirname(__file__), "..", "dist")
+if _osp.isdir(_DIST):
+    app.mount("/", StaticFiles(directory=_DIST, html=True), name="frontend")
