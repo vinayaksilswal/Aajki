@@ -20,6 +20,7 @@ the app never creates or alters tables at startup.
 ```bash
 cd backend-python
 python -m venv .venv && .venv/Scripts/pip install -r requirements-dev.txt   # macOS/Linux: .venv/bin/pip
+set APP_ENV=development
 set DATABASE_URL=sqlite:///local.db        # use a local DB, not the shared one in .env
 .venv/Scripts/python -m alembic upgrade head
 .venv/Scripts/python -m uvicorn main:app --reload --port 8000

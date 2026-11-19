@@ -16,6 +16,7 @@ with no purchase or cash-out path, status-only rewards and DPDP-aligned privacy.
 # 1. API on a local SQLite database (see backend-python/README.md)
 cd backend-python
 python -m venv .venv && .venv/Scripts/pip install -r requirements-dev.txt
+set APP_ENV=development
 set DATABASE_URL=sqlite:///local.db
 .venv/Scripts/python -m alembic upgrade head
 .venv/Scripts/python -m uvicorn main:app --port 8000

@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", env_file_encoding="utf-8",
                                       extra="ignore")
 
-    app_env: Literal["development", "test", "staging", "production"] = "development"
+    # Fails closed: an unset APP_ENV means production, so a deploy that forgets it refuses to
+    # start without its required settings instead of running with dev shortcuts (open admin).
+    # Local work sets APP_ENV=development explicitly (see .env.example).
+    app_env: Literal["development", "test", "staging", "production"] = "production"
     database_url: str = ""
     # Comma-separated list of browser origins allowed to call the API.
     allowed_origins: str = ""

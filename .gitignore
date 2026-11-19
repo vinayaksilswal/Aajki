@@ -13,3 +13,6 @@ backend-python/__pycache__/
 
 # local dev database
 backend-python/local.db
+
+# local database backups (contain personal data)
+backend-python/backups/

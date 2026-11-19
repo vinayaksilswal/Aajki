@@ -55,6 +55,14 @@ def test_production_refuses_unsafe_configuration(env, expected):
         Settings(_env_file=None, **env).check()
 
 
+def test_unset_app_env_fails_closed_as_production(monkeypatch):
+    monkeypatch.delenv("APP_ENV", raising=False)
+    st = Settings(_env_file=None, database_url="", admin_password="", allowed_origins="")
+    assert st.app_env == "production" and not st.is_dev
+    with pytest.raises(RuntimeError, match="ADMIN_PASSWORD"):
+        st.check()
+
+
 def test_development_defaults_to_local_frontend_origins():
     assert Settings(_env_file=None, app_env="development").origins == [
         "http://localhost:5180", "http://127.0.0.1:5180"]
