@@ -1,21 +1,12 @@
 import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
 
-// In dev the frontend (5180) proxies backend paths to the Express backend (8787),
-// which then talks to the real Aajki API. This mirrors production on Vercel, where the
-// same paths are served by the serverless function. `npm run dev` starts both.
-const BACKEND = process.env.BACKEND_ORIGIN || 'http://127.0.0.1:8787';
-
+// Static consumer app. `base: './'` keeps every asset URL relative, so the same build
+// runs on the web and inside the Android WebView shell (file:///android_asset/).
+// The app calls the backend directly at VITE_API_BASE (the backend's CORS allow-list
+// must include this origin), so the dev server needs no proxy.
 export default defineConfig({
-  plugins: [react()],
-  server: {
-    host: true,
-    port: 5180,
-    strictPort: true,
-    proxy: {
-      '/api': { target: BACKEND, changeOrigin: true },
-      '/admin': { target: BACKEND, changeOrigin: true },
-      '/healthz': { target: BACKEND, changeOrigin: true },
-    },
-  },
+  base: './',
+  server: { host: true, port: 5180, strictPort: true },
+  preview: { port: 5180, strictPort: true },
+  build: { target: 'es2019', sourcemap: true },
 });
