@@ -2,5 +2,8 @@ fastapi==0.141.1
 uvicorn[standard]==0.34.0
 SQLAlchemy==2.0.54
 psycopg[binary]==3.3.6
+alembic==1.14.0
+pydantic-settings==2.7.1
 python-dotenv==1.0.1
 python-multipart==0.0.18
+defusedxml==0.7.1
