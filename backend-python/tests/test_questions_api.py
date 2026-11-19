@@ -119,6 +119,10 @@ def test_election_quiet_period_withholds_chance_only_on_sensitive_questions(clie
     assert o_body["chance_hidden"] is False and o_body["outcomes"][0]["chance"] == 0.25
 
 
-def test_public_reads_are_cacheable_briefly(client):
+def test_only_the_cdn_caches_public_reads(client):
     make_question()
-    assert "max-age=10" in client.get("/v1/questions").headers["cache-control"]
+    for path in ("/v1/questions", "/v1/ticker"):
+        h = client.get(path).headers
+        assert h["cache-control"] == "no-cache"                 # browsers always revalidate
+        assert "s-maxage" in h["cdn-cache-control"]             # the edge absorbs bursts
+        assert "stale-while-revalidate" not in h["cache-control"]

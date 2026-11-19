@@ -270,9 +270,9 @@
   .opt-btn.sel.yes{ border-color:var(--div-pos); background:color-mix(in srgb, var(--div-pos) 12%, var(--surface)); }
   .opt-btn.sel.no{ border-color:var(--div-neg); background:color-mix(in srgb, var(--div-neg) 12%, var(--surface)); }
   .opt-btn .lbl{ font-size:12px; font-weight:600; color:var(--ink-2); }
-  .opt-btn .odds{ font-family:var(--font-mono); font-size:17px; font-weight:600; }
-  .opt-btn.yes .odds{ color:var(--div-pos); }
-  .opt-btn.no .odds{ color:var(--div-neg); }
+  .opt-btn .chance-val{ font-family:var(--font-mono); font-size:17px; font-weight:600; }
+  .opt-btn.yes .chance-val{ color:var(--div-pos); }
+  .opt-btn.no .chance-val{ color:var(--div-neg); }
   .chip-row{ display:flex; gap:6px; margin:8px 0; flex-wrap:wrap; }
   .chip-row button{ border:1px solid var(--border); background:var(--surface-2); border-radius:8px; padding:6px 10px; font-size:12px; font-weight:600; cursor:pointer; }
   .chip-row button.active{ background:var(--ink); color:var(--page); border-color:var(--ink); }
@@ -470,3 +470,23 @@
 
   ::-webkit-scrollbar{ width:8px; height:8px; }
   ::-webkit-scrollbar-thumb{ background:var(--baseline); border-radius:8px; }
+
+/* ---------- live data states ---------- */
+.feed-state{ display:flex; flex-direction:column; align-items:flex-start; gap:6px; border:1px dashed var(--border); border-radius:13px; padding:16px; margin:6px 0 10px; font-size:12.5px; color:var(--ink-2); background:var(--surface); }
+.feed-state b{ color:var(--ink); font-size:13px; }
+.feed-state.loading{ flex-direction:row; align-items:center; gap:10px; }
+.feed-state.error{ border-style:solid; border-color:color-mix(in srgb, var(--status-critical) 40%, var(--border)); }
+.feed-state .ref{ font-family:var(--font-mono); font-size:10.5px; color:var(--ink-muted); }
+.spinner{ width:14px; height:14px; border-radius:50%; border:2px solid var(--border); border-top-color:var(--brand); animation:spin .8s linear infinite; display:inline-block; flex:none; }
+@keyframes spin{ to{ transform:rotate(360deg); } }
+.prob-bar.empty{ background:var(--surface-3); }
+a.news-item{ text-decoration:none; }
+a.news-item:hover{ color:var(--ink); }
+.news-src{ color:var(--ink-muted); font-size:10.5px; }
+.resolve-box{ margin-top:12px; border:1px solid var(--border); border-radius:11px; padding:10px 12px; background:var(--surface-2); }
+.resolve-box h4{ font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-muted); margin-bottom:4px; }
+.resolve-box p{ margin:0 0 6px; font-size:12.5px; color:var(--ink-2); line-height:1.5; }
+.resolve-box a{ font-size:12px; font-weight:600; color:var(--brand); }
+.grievance{ padding:14px 16px; margin-top:12px; display:flex; flex-direction:column; gap:4px; font-size:12.5px; }
+.grievance .k{ font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-muted); }
+.contest-card:focus-visible, .feed-row:focus-visible{ outline:2px solid var(--brand); outline-offset:2px; }

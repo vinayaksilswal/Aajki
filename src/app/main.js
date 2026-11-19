@@ -1,11 +1,12 @@
-// Bharat Foreseez consumer app. Split out of the original single-file build.
+// Bharat Foreseez consumer app.
+import { api, allOpenQuestions } from './api.js';
+
 const BRAND = import.meta.env.BASE_URL + 'brand/';
 
 (function(){
   "use strict";
 
   /* ============ utils ============ */
-  function mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
   function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
   function fmtNum(n){ return Math.round(n).toLocaleString('en-IN'); }
   const WEEKDAYS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -14,11 +15,6 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
   function formatDateLong(d){ return WEEKDAYS[d.getDay()]+', '+d.getDate()+' '+MONTHS[d.getMonth()]; }
   function formatTime(d){ let h=d.getHours(); const m=String(d.getMinutes()).padStart(2,'0'); const ap=h>=12?'pm':'am'; h=h%12; if(h===0)h=12; return h+':'+m+' '+ap; }
   function isoIST(d){ const p=n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())+'+05:30'; }
-  // NOW_BASE anchors "today" for the sentiment index's most-recent day and each
-  // contest's countdown, captured once when the app boots. liveNow() is called
-  // fresh everywhere a countdown or clock is actually drawn, so the app always
-  // shows the real current time rather than a frozen demo timestamp.
-  const NOW_BASE = new Date();
   function liveNow(){ return new Date(); }
   function timeNow(){ return formatTime(liveNow()); }
   function esc(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -41,123 +37,72 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     {key:'elections', label:'Elections', color:'var(--cat-elections)', emoji:'🗳️'},
     {key:'markets', label:'Markets', color:'var(--cat-markets)', emoji:'📈'},
     {key:'sports', label:'Sports', color:'var(--cat-sports)', emoji:'🏏'},
-    {key:'entertainment', label:'Entertainment', color:'var(--cat-entertainment)', emoji:'🎬'},
     {key:'policy', label:'Policy', color:'var(--cat-policy)', emoji:'📜'},
     {key:'world', label:'World', color:'var(--cat-world)', emoji:'🌍'},
-    {key:'brand', label:'Brand Polls', color:'var(--cat-brand)', emoji:'🎯'},
-    {key:'community', label:'Community Polls', color:'var(--cat-community)', emoji:'💬'}
+    {key:'community', label:'Community', color:'var(--cat-community)', emoji:'💬'}
   ];
   const CAT_MAP = Object.fromEntries(CATS.map(c=>[c.key,c]));
 
-  const CONTESTS_SEED = [
-    {id:'elec-turnout', category:'elections', title:'Bihar bypoll turnout crosses 58%?', desc:"Election Commission provisional turnout figures for the scheduled Bihar assembly bypoll, measured against the 58% mark.", closesInHrs:176, yes:'Turnout ≥ 58%', no:'Turnout < 58%', pool:{yes:2150,no:2680}},
-    {id:'elec-enrol', category:'elections', title:'Voter enrolment additions beat last quarter?', desc:'Net new voter enrolments this quarter, per ECI electoral rolls, compared with the previous quarter’s net additions.', closesInHrs:488, yes:'Enrolment up q/q', no:'Down or flat', pool:{yes:1340,no:980}},
-    {id:'mkt-nifty', category:'markets', title:'Nifty 50 closes above 26,000 this month?', desc:'NSE closing value of the Nifty 50 index within the current trading month.', closesInHrs:365, yes:'Nifty > 26,000', no:'Nifty ≤ 26,000', pool:{yes:5200,no:4100}},
-    {id:'mkt-repo', category:'markets', title:'RBI holds the repo rate at the next MPC meeting?', desc:'Monetary Policy Committee decision at its next scheduled meeting — hold vs. change.', closesInHrs:530, yes:'Rate held', no:'Rate changed', pool:{yes:6800,no:2300}},
-    {id:'mkt-rupee', category:'markets', title:'Rupee strengthens past ₹87/USD before month‑end?', desc:'RBI reference rate for INR/USD closing stronger than 87.00 on any day before month‑end.', closesInHrs:319, yes:'Rupee > ₹87/USD', no:'Rupee ≤ ₹87/USD', pool:{yes:1900,no:3100}},
-    {id:'sport-odi', category:'sports', title:"India wins the next ODI vs. Australia?", desc:"Result of India's next scheduled ODI fixture against Australia.", closesInHrs:106, yes:'India wins', no:"India doesn't win", pool:{yes:4400,no:2600}},
-    {id:'sport-isl', category:'sports', title:"Home side wins tonight's ISL fixture?", desc:'Full‑time result of tonight’s Indian Super League fixture.', closesInHrs:14, yes:'Home side wins', no:"Home side doesn't win", pool:{yes:1580,no:1420}},
-    {id:'sport-ag-medals', category:'sports', title:'India finishes inside the top 5 at the Aichi‑Nagoya Asian Games?', desc:'Final overall medal‑table placement (by total medals) for India when the Games close on October 4, 2026 — despite the widely‑reported accommodation and logistics disruptions.', closesInHrs:264, yes:'Top 5 finish', no:'Outside top 5', pool:{yes:2400,no:2100}},
-    {id:'sport-ag-accom', category:'sports', title:'Asian Games organisers issue a formal apology over the housing crisis?', desc:'Whether Aichi‑Nagoya 2026 organisers or Nagoya city officials issue a formal apology or corrective statement after widespread athlete‑housing complaints from India, China, South Korea and the Philippines.', closesInHrs:216, yes:'Formal apology issued', no:'No formal apology', pool:{yes:1450,no:2050}},
-    {id:'sport-ag-chanu', category:'sports', title:"Mirabai Chanu medals despite the Games' travel delays?", desc:'Weightlifter Mirabai Chanu faced lengthy arrival and accommodation delays at the Asian Games. Does she still win a medal in her event?', closesInHrs:72, yes:'Medals', no:"Doesn't medal", pool:{yes:1900,no:1600}},
-    {id:'world-ru-tariff-india', category:'world', title:'US formally applies the new 100% Russian‑oil tariff to India?', desc:"Whether the White House applies the tariff authorised under the newly‑signed Sanctioning Russia and Iran Act to India specifically, given India's continued Russian energy imports.", closesInHrs:672, yes:'Tariff applied to India', no:'Not applied', pool:{yes:2600,no:3400}},
-    {id:'world-ru-ukraine-truce', category:'world', title:'A new Russia–Ukraine truce holds for 7+ days this quarter?', desc:'Following the failed April and May 2026 truce attempts, does any newly announced ceasefire hold without a major documented violation for at least seven consecutive days?', closesInHrs:600, yes:'Holds 7+ days', no:'Breaks down sooner', pool:{yes:1750,no:2950}},
-    {id:'mkt-rupee-tariff', category:'markets', title:'Rupee weakens past ₹89/USD on tariff uncertainty?', desc:'RBI reference rate for INR/USD closing weaker than 89.00 on any day this month, amid the new US sanctions‑linked tariff threat over Russian energy imports.', closesInHrs:310, yes:'Rupee > ₹89/USD (weaker)', no:'Rupee ≤ ₹89/USD', pool:{yes:2100,no:2900}},
-    {id:'pol-dpdp', category:'policy', title:'Data Protection Rules notified this quarter?', desc:'Whether the DPDP Act rules are formally notified in the Gazette within the current quarter.', closesInHrs:368, yes:'Notified this quarter', no:'Not notified', pool:{yes:3300,no:2100}},
-    {id:'pol-gst', category:'policy', title:'GST Council approves rate rationalisation this session?', desc:"Whether the GST Council's upcoming session approves the proposed slab rationalisation.", closesInHrs:248, yes:'Approved', no:'Not approved this session', pool:{yes:2450,no:2900}},
-    {id:'elec-bypoll2', category:'elections', title:'Second phase bypoll turnout beats phase one?', desc:'Whether provisional turnout in the second phase exceeds the first phase’s figure.', closesInHrs:212, yes:'Beats phase one', no:'At or below phase one', pool:{yes:1120,no:1360}},
-    {id:'mkt-gold', category:'markets', title:'Gold holds above ₹75,000/10g this month?', desc:'MCX gold futures closing price staying above ₹75,000 per 10 grams through month‑end.', closesInHrs:290, yes:'Holds above', no:'Dips below', pool:{yes:2600,no:1950}},
-    {id:'sport-kabaddi', category:'sports', title:'Defending champions retain the Pro Kabaddi title?', desc:'Whether the reigning champions win the next Pro Kabaddi League season.', closesInHrs:540, yes:'Retain title', no:'New champion', pool:{yes:1780,no:2040}},
-    {id:'pol-evtarget', category:'policy', title:'EV sales cross 10% of new registrations this quarter?', desc:'Whether electric vehicles reach 10% of new vehicle registrations nationally this quarter, per VAHAN data.', closesInHrs:410, yes:'Crosses 10%', no:'Stays below', pool:{yes:1990,no:2210}},
-    {id:'world-fed', category:'world', title:'US Federal Reserve cuts rates at its next FOMC meeting?', desc:"Decision at the Federal Open Market Committee's next scheduled meeting — cut vs. hold/raise.", closesInHrs:340, yes:'Rate cut', no:'Held or raised', pool:{yes:3800,no:3100}},
-    {id:'world-uk-turnout', category:'world', title:'UK general election turnout tops 65%?', desc:"Official UK Electoral Commission turnout figure for the next general election.", closesInHrs:720, yes:'Turnout ≥ 65%', no:'Turnout < 65%', pool:{yes:1450,no:1980}},
-    {id:'world-sp500', category:'world', title:'S&P 500 closes at a fresh all‑time high this month?', desc:'Whether the S&P 500 sets a new closing record before month‑end.', closesInHrs:280, yes:'New high set', no:'No new high', pool:{yes:4200,no:3600}},
-    {id:'world-cup', category:'world', title:'Defending champion advances past the group stage?', desc:"Whether the reigning champion progresses past the group stage at the next major international football tournament.", closesInHrs:600, yes:'Advances', no:'Eliminated in groups', pool:{yes:5100,no:1400}},
-    {id:'world-un', category:'world', title:'UN Security Council passes the pending resolution this session?', desc:'Whether the resolution currently tabled at the UN Security Council is adopted this session.', closesInHrs:190, yes:'Passes', no:'Fails or vetoed', pool:{yes:1680,no:2260}},
-    {id:'world-climate', category:'world', title:'Global temperature anomaly stays above +1.5°C this month?', desc:"Monthly global average surface temperature anomaly vs. pre‑industrial baseline, per Copernicus/NOAA data.", closesInHrs:250, yes:'Stays above +1.5°C', no:'Falls below', pool:{yes:2900,no:1700}},
-    {id:'world-unga-jaishankar', category:'world', title:"Jaishankar's UNGA address names a country critically?", desc:"External Affairs Minister S. Jaishankar leads India's delegation and addresses the UNGA General Debate on September 26. Indian MEA convention typically avoids naming specific countries critically — does this address break from that pattern?", closesInHrs:54, yes:'Names a country critically', no:'No country named critically', pool:{yes:1200,no:2800}},
-    {id:'world-unga-ai-res', category:'world', title:'UNGA adopts a dedicated AI‑governance resolution this session?', desc:"Following Digital Cooperation Day and the UN's newly appointed Global Advocate for Human‑centric Digital Governance, does the 81st UNGA session formally adopt a resolution specifically on AI governance?", closesInHrs:2160, yes:'Resolution adopted', no:'Not adopted this session', pool:{yes:1850,no:2150}},
-    {id:'world-us-midterm-house', category:'world', title:'Democrats win a majority in the US House in the November midterms?', desc:'Party control of the US House of Representatives after the November 3, 2026 midterm elections. Republicans currently hold a narrow majority.', closesInHrs:720, yes:'Democrats win the House', no:'Republicans keep the House', pool:{yes:6200,no:3800}},
-    {id:'world-us-midterm-senate', category:'world', title:'Democrats win control of the US Senate in the November midterms?', desc:'Party control of the US Senate after the November 3, 2026 midterm elections. Republicans currently hold the chamber and analysts widely describe the race for control as close.', closesInHrs:720, yes:'Democrats win the Senate', no:'Republicans keep the Senate', pool:{yes:4300,no:5200}},
-    {id:'world-brazil-lula', category:'world', title:'Lula wins a fourth term as Brazil’s president?', desc:'Final result of Brazil’s 2026 presidential election, including the October 25 runoff if one is needed. Polls have shown President Lula and Senator Flávio Bolsonaro within a few points of each other.', closesInHrs:504, yes:'Lula is elected', no:'Another candidate is elected', pool:{yes:5100,no:4900}},
-    {id:'ent-drishyam-250', category:'entertainment', title:'Drishyam: The Conclusion crosses ₹250 crore net in India by October 11?', desc:'India net box-office total for Ajay Devgn’s Drishyam: The Conclusion, released October 2, per major trade trackers, by the end of its second weekend.', closesInHrs:190, yes:'₹250 crore or more', no:'Below ₹250 crore', pool:{yes:3800,no:3300}},
-    {id:'ent-udta-teer-open', category:'entertainment', title:'Udta Teer opens above ₹5 crore net on day one?', desc:'India net day-one collection for the October 9 release starring Ayushmann Khurrana and Sara Ali Khan, as reported by trade trackers.', closesInHrs:170, yes:'Above ₹5 crore', no:'₹5 crore or less', pool:{yes:2100,no:2900}},
-    {id:'ent-avengers-dune', category:'entertainment', title:'Avengers: Doomsday out-earns Dune: Part Three on opening weekend?', desc:'Both Hollywood tentpoles are scheduled for December 18, 2026. Which film has the higher North American opening-weekend gross?', closesInHrs:1900, yes:'Avengers: Doomsday', no:'Dune: Part Three', pool:{yes:6900,no:2300}},
-    {id:'ent-avengers-250m', category:'entertainment', title:'Avengers: Doomsday opens above $250 million in North America?', desc:'Opening-weekend domestic gross for Avengers: Doomsday, scheduled for release on December 18, 2026, per studio-reported actuals.', closesInHrs:1900, yes:'Above $250M', no:'$250M or less', pool:{yes:3400,no:3900}},
-    {id:'ent-grammy-swift', category:'entertainment', title:'Taylor Swift earns an Album of the Year nomination at the 2027 Grammys?', desc:'The Recording Academy announces 2027 Grammy nominations on November 16, 2026, ahead of the ceremony on February 7, 2027.', closesInHrs:1030, yes:'Nominated', no:'Not nominated', pool:{yes:7200,no:2100}},
-    {id:'ent-hot100-new1', category:'entertainment', title:'A new No. 1 takes over the Billboard Hot 100 on the October 17 chart?', desc:'Whether the song at No. 1 on the Billboard Hot 100 dated October 17, 2026 differs from the No. 1 on the chart dated October 10.', closesInHrs:190, yes:'New No. 1', no:'Same No. 1', pool:{yes:2600,no:4700}},
-    {id:'elec-up-census', category:'elections', title:'UP caste census results released by the Feb 2027 deadline?', desc:"Whether the Uttar Pradesh caste census — cited by SBSP chief Om Prakash Rajbhar as the trigger for his renewed four‑way state‑division demand — is completed and its results released by the stated February 2027 deadline.", closesInHrs:3800, yes:'Released on time', no:'Delayed past deadline', pool:{yes:1650,no:2450}},
-    {id:'elec-up-nda-rift', category:'elections', title:"UP's ruling NDA coalition avoids a public rupture over the state‑division row this quarter?", desc:"BJP ally Sanjeev Balyan has backed Om Prakash Rajbhar's UP state‑division proposal, while coalition partner the Nishad Party has strongly opposed it. Does the alliance avoid a formal, public split over this issue in the current quarter?", closesInHrs:1440, yes:'Coalition holds', no:'Public rupture occurs', pool:{yes:2900,no:1300}},
-    {id:'elec-punjab-alliance', category:'elections', title:'BJP and Shiromani Akali Dal announce a formal 2027 alliance before year‑end?', desc:"BJP‑SAD alliance talks reportedly gained pace through August 2026, even as BJP's Punjab unit says it's preparing to contest all 117 seats alone. Is a formal pre‑poll alliance announced before December 31, 2026?", closesInHrs:2352, yes:'Alliance announced', no:'No alliance by year‑end', pool:{yes:1700,no:2300}},
-    {id:'pol-upi-mdr', category:'policy', title:'New UPI merchant fee (MDR) framework takes effect on schedule?', desc:'The tiered UPI Merchant Discount Rate framework — free for P2P and small merchants, capped charges above ₹2,000 — is slated to take effect October 15, 2026. Does it roll out on that date without a deferral?', closesInHrs:504, yes:'Takes effect on schedule', no:'Deferred or delayed', pool:{yes:3200,no:1100}},
-    {id:'pol-ecom-rules', category:'policy', title:'New e‑commerce consumer‑protection rules take effect on schedule?', desc:'New rules requiring algorithmic‑search disclosure, sponsored‑result labelling and dark‑pattern audits for e‑commerce platforms are slated to begin January 1, 2027. Do they take effect on that date as planned?', closesInHrs:2376, yes:'Takes effect on schedule', no:'Deferred or delayed', pool:{yes:2600,no:1500}},
-    // Brand Polls: hypothetical sponsored questions — a consumer brand asks the
-    // crowd for product feedback instead of running a traditional survey.
-    // Same earn‑only mechanics as every other topic; the brand's product is
-    // the subject, not something bought or staked. Aggregated, anonymized
-    // sentiment from these is exactly the licensable data product described
-    // in the pitch — this is that pillar made concrete inside the app.
-    {id:'brand-suzuki-swift', category:'brand', sponsor:'Suzuki', title:'Will most players rate the new Swift facelift 4★ or higher?', desc:'Suzuki is gauging early consumer sentiment on its refreshed Swift hatchback ahead of launch. Aggregated, anonymized responses only — never individually identifiable.', closesInHrs:120, yes:'4★ or higher', no:'Below 4★', pool:{yes:2200,no:1400}},
-    {id:'brand-bmw-ev', category:'brand', sponsor:'BMW', title:'Would you consider BMW’s upcoming compact EV for your next car?', desc:'BMW is testing purchase intent for a compact EV ahead of its India launch, using real player sentiment instead of a traditional panel survey.', closesInHrs:240, yes:'Would consider it', no:'Would not', pool:{yes:1850,no:2050}},
-    {id:'brand-boat-earbuds', category:'brand', sponsor:'boAt', title:'Will boAt’s new earbuds outsell their previous flagship in month one?', desc:'boAt wants to know whether players expect the new launch to beat the outgoing model’s first‑month sales — a live crowd read ahead of the official numbers.', closesInHrs:340, yes:'Outsells it', no:'Falls short', pool:{yes:1620,no:1180}},
-    // Sponsored campaign: a paid Suzuki sponsorship with its own real-world
-    // prizes for the top 5 players on this one question — distinct from
-    // the ordinary brand poll above. campaignId links it to CAMPAIGNS below.
-    {id:'brand-suzuki-ev-accept', category:'brand', sponsor:'Suzuki', campaignId:'suzuki-ev-2026', title:'Would most Indian car buyers seriously consider an EV as their next car?', desc:'A paid Suzuki sponsorship: gauging real, India‑wide consumer sentiment on EV adoption ahead of a launch decision. Top 5 players on this question win real prizes from Suzuki — aggregated, anonymized responses only, never individually identifiable.', closesInHrs:168, yes:'Would seriously consider one', no:'Would not', pool:{yes:214000,no:166000}}
-  ];
-  // Anchor each contest's close time to the moment the app actually loaded,
-  // rather than a fixed calendar date, so countdowns always make sense
-  // whenever this prototype is opened.
-  CONTESTS_SEED.forEach(c => { c.closes = new Date(NOW_BASE.getTime() + c.closesInHrs*3600000); });
+  /* ============ live data (Bharat Foreseez API) ============
+     Questions and headlines come from the backend. There is no offline or sample content:
+     while loading, or if the server can't be reached, the app says so. */
+  const FEED_REFRESH_MS = 60000;
+  const TICKER_REFRESH_MS = 300000;
+  // Spec s.6: no sentiment breakdown is shown for a group smaller than this.
+  const MIN_GROUP = 50;
+  // Phase 1 ships status-only rewards; the server's /v1/app-config is the source of truth.
+  const PHASE1_FLAGS = { prizes:false, plus:false, sponsored_polls:false, user_created_polls:false, spin_the_wheel:false };
 
-  // Context-feed headlines: illustrative narrative copy giving each foreseeing
-  // category real-world texture. Static seed + occasional new arrivals via
-  // tickLive, same pattern as the activity strip — clearly labelled as
-  // illustrative in the UI, never presented as a live news connection.
-  const NEWS_SEED = [
-    {cat:'world', text:'G20 finance deputies meet ahead of next month’s communiqué on cross-border payments.'},
-    {cat:'world', text:'Brazil’s presidential race heads toward an October 25 runoff if no candidate clears 50% of valid votes; polls show Lula and Flávio Bolsonaro within a few points.'},
-    {cat:'world', text:'US midterm campaigns enter their final month with control of both chambers of Congress in play on November 3.'},
-    {cat:'entertainment', text:'Drishyam: The Conclusion posts one of the biggest Hindi openings of 2026, trade trackers report.'},
-    {cat:'entertainment', text:'Recording Academy confirms Grammy nominations on November 16 and the ceremony on February 7, 2027.'},
-    {cat:'entertainment', text:'Avengers: Doomsday and Dune: Part Three are both slated to open on December 18.'},
-    {cat:'world', text:'Red Sea shipping volumes edge up as insurers reprice war-risk premiums.'},
-    {cat:'markets', text:'FPI flows into Indian equities turn net positive for a second straight week.'},
-    {cat:'markets', text:'Brent crude holds near recent range as OPEC+ output policy stays unchanged.'},
-    {cat:'policy', text:'Parliamentary standing committee schedules review of the DPDP Rules implementation timeline.'},
-    {cat:'policy', text:'RBI monetary policy committee minutes released; commentary flags food-price base effects.'},
-    {cat:'elections', text:'Election Commission updates model code guidance ahead of the bypoll schedule.'},
-    {cat:'elections', text:'State CEO offices report final electoral roll revision figures.'},
-    {cat:'world', text:'EU council discusses tariff carve-outs in ongoing trade-framework talks.'},
-    {cat:'world', text:'UN climate body publishes interim monitoring update on 1.5°C pathway tracking.'},
-    {cat:'sports', text:'BCCI confirms venue schedule for the upcoming home international season.'},
-    {cat:'markets', text:'Gold holds near recent highs as investors track central-bank reserve buying.'},
-    {cat:'policy', text:'GST Council secretariat circulates agenda note ahead of the next session.'},
-    {cat:'world', text:'Central banks in the G7 signal a data-dependent stance heading into next quarter.'},
-    {cat:'world', text:'UNGA high-level week opens in New York with EAM Jaishankar set to lead the Indian delegation.'},
-    {cat:'world', text:'UN Digital Cooperation Day spotlights human-centric AI governance ahead of the General Debate.'},
-    {cat:'elections', text:'SBSP chief Om Prakash Rajbhar revives the four-way UP state-division debate ahead of 2027 polls.'},
-    {cat:'elections', text:'UP coalition partners trade public statements over the state-division proposal.'},
-    {cat:'elections', text:'Punjab BJP unit signals readiness to contest all 117 seats as SAD alliance talk continues.'},
-    {cat:'policy', text:'NPCI circulates merchant guidance ahead of the tiered UPI fee framework taking effect next month.'},
-    {cat:'policy', text:'Commerce ministry publishes draft compliance checklist for incoming e-commerce disclosure rules.'},
-  ];
-  function seedNewsFeed(){
-    const rng = mulberry32(77);
-    return NEWS_SEED.slice().sort(()=>rng()-0.5).map((n,i)=>({ cat:n.cat, text:n.text, minsAgo: 4 + i*7 + Math.floor(rng()*5) }));
+  function toDef(q){
+    const out = {}; (q.outcomes||[]).forEach(o=>{ out[o.key] = o; });
+    return {
+      id:q.id, category:q.category, title:q.title, desc:q.description||'',
+      yes:(out.yes && out.yes.label) || 'Yes', no:(out.no && out.no.label) || 'No',
+      closes: q.closes_at ? new Date(q.closes_at) : null,
+      participants:q.participants||0, chanceHidden:!!q.chance_hidden,
+      chance:{ yes: out.yes ? out.yes.chance : null, no: out.no ? out.no.chance : null },
+      resolution:q.resolution||{}, context:q.context||null, status:q.status
+    };
   }
-
-  const PRIZES = [
-    {id:'earbuds', name:'Wireless Earbuds', short:'Earbuds', desc:'Over‑ear, 24h battery.', cost:1800, tag:'Electronics'},
-    {id:'smartwatch', name:'Fitness Smartwatch', short:'Smartwatch', desc:'Heart‑rate + SpO2 tracking.', cost:3200, tag:'Electronics'},
-    {id:'telescope', name:'Tabletop Telescope', short:'Telescope', desc:'70mm refractor with tripod.', cost:2400, tag:'Electronics'},
-    {id:'boardgames', name:'Strategy Board‑Game Set', short:'Board Games', desc:'A curated 3‑game bundle.', cost:1200, tag:'Games'},
-    {id:'cricketbat', name:'Signed Cricket Bat', short:'Cricket Bat', desc:'Team‑signed willow, display‑cased.', cost:5000, tag:'Collectible'},
-    {id:'trek', name:'Weekend Trek Package', short:'Trek Package', desc:'Two‑person guided foothill trek.', cost:6500, tag:'Experience'}
-  ];
-  function bestPrizeFor(pts){
-    const affordable = PRIZES.filter(p=>pts>=p.cost).sort((a,b)=>b.cost-a.cost);
-    return affordable.length ? affordable[0] : null;
+  function applyQuestions(list){
+    const defs = {};
+    list.forEach(q=>{ if(CAT_MAP[q.category]) defs[q.id] = toDef(q); });
+    state.questionDefs = defs;
+    state.contests = Object.values(defs).map(d=>({ id:d.id, status: d.status==='settled' ? 'resolved' : 'open', resolvedOption:null }));
+  }
+  let feedInFlight = null, feedLoadedAt = 0;
+  const FEED_MIN_GAP_MS = 15000;
+  function loadFeed(){
+    // One request at a time: boot, the refresh timer and tab-visibility events can overlap.
+    if(!feedInFlight) feedInFlight = fetchFeed().finally(()=>{ feedInFlight = null; });
+    return feedInFlight;
+  }
+  async function fetchFeed(){
+    const hadData = state.contests.length > 0;
+    state.feedStatus = hadData ? 'refreshing' : 'loading';
+    if(!hadData) render();
+    try {
+      applyQuestions(await allOpenQuestions());
+      state.feedStatus = 'ready'; state.feedError = null; feedLoadedAt = Date.now();
+    } catch(e){
+      // Keep showing the last good data on a failed background refresh.
+      state.feedStatus = hadData ? 'ready' : 'error';
+      state.feedError = e;
+    }
+    render();
+  }
+  async function loadTicker(){
+    try { const t = await api.ticker(); state.newsFeed = t.items || []; state.newsAttribution = t.attribution || ''; }
+    catch(e){ /* the ticker is optional context; keep whatever was shown */ }
+    render();
+  }
+  async function loadAppConfig(){
+    try {
+      const cfg = await api.appConfig();
+      state.flags = Object.assign({}, PHASE1_FLAGS, cfg.flags || {});
+      state.grievance = cfg.grievance_officer || null;
+      render();
+    } catch(e){ /* stay on the Phase 1 defaults */ }
   }
 
   // Winner Prizes: grand, non‑cash prizes awarded — never purchased or point‑redeemed —
@@ -172,71 +117,6 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     {id:'linkedin-learning', name:'LinkedIn Learning — 1 Year', desc:'Professional and technical skills courses.', tag:'Education', tier:'Top 25, monthly', icon:'🎓'},
     {id:'duolingo-super', name:'Duolingo Super — 1 Year', desc:'Ad‑free, unlimited language learning.', tag:'Education', tier:'Top 25, monthly', icon:'🎓'}
   ];
-
-  // A handful of the most active seeded players are marked verified —
-  // makes the badge read as a real, earned status other players also
-  // have, not just a cosmetic toggle on the signed-in user.
-  const LB_SEED = [
-    {name:'Rhea Kapoor', pts:4820, verified:true},{name:'Aman Verma', pts:4510, verified:true},{name:'Kavya Iyer', pts:4275, verified:true},
-    {name:'Devansh Rao', pts:3990, verified:true},{name:'Sanya Bhatt', pts:3820, verified:true},{name:'Ishaan Nair', pts:3640},
-    {name:'Meera Joshi', pts:3410},{name:'Arjun Sethi', pts:3105},{name:'Priya Menon', pts:2870},
-    {name:'Rohan Dutta', pts:2640},{name:'Tanvi Shah', pts:2390},{name:'Vikram Pillai', pts:2110},
-    {name:'Omar Farsi', pts:3560, verified:true},{name:'Lena Kovač', pts:2980},{name:'Marco Rossi', pts:2510}
-  ];
-
-  // Sponsored Campaigns: a paid brand campaign that offers its own real-world
-  // prizes to the top players on ONE specific question — distinct from
-  // the app-wide Winner Prizes above. This is the "Sponsorship" revenue line
-  // from the pitch made concrete: campaign-scoped ranking reuses the same
-  // pari-mutuel payout every topic already runs on (net points won on this
-  // campaign's question), it does not invent a new scoring mechanic. Real,
-  // non-cash prizes still require the same selfie/KYC verification every
-  // other prize-eligible action in this app requires, since fulfilment means
-  // shipping or crediting an actual, identified person.
-  const CAMPAIGNS = {
-    'suzuki-ev-2026': {
-      id:'suzuki-ev-2026',
-      sponsor:'Suzuki',
-      title:'Suzuki EV Acceptance Index — India',
-      contestId:'brand-suzuki-ev-accept',
-      blurb:'A paid Suzuki sponsorship: gauging real consumer sentiment on EV adoption across India before committing to a launch strategy. Aggregated, anonymized responses power the read Suzuki buys — individual foresights are never sold or shared identifiably.',
-      rankedBy:'net Foreseez Points won on this one campaign question',
-      entrants:3180,
-      correctShare:0.55,
-      prizes:[
-        {rank:1, name:'iPhone 17 Pro',            icon:'📱', value:'Fulfilled directly by Suzuki, after KYC match'},
-        {rank:2, name:'iPad',                      icon:'📱', value:'Fulfilled directly by Suzuki, after KYC match'},
-        {rank:3, name:'Fitness Smartwatch',          icon:'⌚', value:'Fulfilled directly by Suzuki, after KYC match'},
-        {rank:4, name:'Wireless Earbuds',            icon:'🎧', value:'Fulfilled directly by Suzuki, after KYC match'},
-        {rank:5, name:'Suzuki Rider Gear Hamper',    icon:'🎁', value:'Fulfilled directly by Suzuki, after KYC match'}
-      ]
-    }
-  };
-  // Illustrative top-5 stakers for the campaign demo — scored with the exact
-  // same payout math as every other topic (staked × total/winning pool),
-  // just seeded with larger, veteran-player stake sizes so a "top 5 out
-  // of thousands" outcome looks like what real conviction-weighted ranking
-  // produces once resolved.
-  const CAMPAIGN_TOP5 = {
-    'suzuki-ev-2026': [
-      {name:'Rhea Kapoor',  staked:4800},
-      {name:'Aman Verma',   staked:4200},
-      {name:'Omar Farsi',   staked:3650},
-      {name:'Devansh Rao',  staked:3300},
-      {name:'Kavya Iyer',   staked:2900}
-    ]
-  };
-
-  const COMMENT_TEMPLATES = [
-    'Leaning {side} based on the last few data points.',
-    'Went with {side} — feels like the safer read here.',
-    'Not obvious either way, but tilting {side}.',
-    '{side} looks right if the recent trend holds.',
-    'Historical base rates favour {side} here.',
-    'Volume’s been picking up on {side} the last hour.',
-    'Going against the crowd on this one — {side}.'
-  ];
-  function hashStr(s){ let h=0; for(let i=0;i<s.length;i++){ h=(Math.imul(31,h)+s.charCodeAt(i))|0; } return h>>>0; }
 
   // Rank badges: named tiers derived from lifetime Foreseez Points balance.
   // Purely an identity/status layer on top of the same earn‑only balance that
@@ -274,9 +154,8 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       _selfiePreviewDataUrl:null, _selfieCameraError:false,
       user:{ signedIn:false, name:'', method:'' },
       ledger:[],
-      contests: CONTESTS_SEED.map(c => ({ id:c.id, status:'open', resolvedOption:null, pool:{yes:c.pool.yes,no:c.pool.no} })),
+      contests: [], questionDefs: {}, feedStatus:'idle', feedError:null,
       predictions:{},
-      redeemed:{},
       checkedIn:false,
       catFilter:'all',
       feed:[],
@@ -294,20 +173,22 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       openCampaign:null,
       _pollDraft:null,
       showRaw:false,
-      newsFeed: seedNewsFeed(),
-      lbPoints: Object.fromEntries(LB_SEED.map(p=>[p.name,p.pts])),
+      newsFeed: [], newsAttribution:'',
+      flags: Object.assign({}, PHASE1_FLAGS), grievance:null,
       _commentMedia:null, _commentConsent:false, _voiceRecording:false, _voiceElapsed:0
     };
   }
   let state = defaultState();
 
-  function contestDef(id){ return CONTESTS_SEED.find(c=>c.id===id) || (state.customPolls||[]).find(c=>c.id===id); }
+  function contestDef(id){ return (state.questionDefs||{})[id] || (state.customPolls||[]).find(c=>c.id===id); }
   // Daily call limits by plan: free 10, Plus 25, Plus Pro unlimited.
   const DAILY_CALL_LIMITS = { free:10, plus:25, pro:Infinity };
   function dailyCallCap(){ return state.plusTier==='pro' ? DAILY_CALL_LIMITS.pro : (state.plus ? DAILY_CALL_LIMITS.plus : DAILY_CALL_LIMITS.free); }
   function rollCallDay(){ const k = liveNow().toDateString(); if(state.callsDay!==k){ state.callsDay=k; state.callsToday=0; } }
   function callsLeftToday(){ rollCallDay(); return Math.max(0, dailyCallCap() - state.callsToday); }
   function balance(){ return state.ledger.length ? state.ledger[state.ledger.length-1].balanceAfter : 0; }
+  // Spec s.6: rank follows lifetime points earned, so committing points never lowers it.
+  function lifetimeEarned(){ return state.ledger.reduce((s,e)=>s + (e.amount > 0 ? e.amount : 0), 0); }
   function addLedger(type,label,amount,contestId){
     const bal = balance() + amount;
     state.ledger.push({ id:'lg'+state.ledger.length+'-'+Date.now(), type, label, amount, balanceAfter:bal, contestId:contestId||null, ts:timeNow() });
@@ -315,26 +196,7 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
   }
 
   /* ============ comments / activity / notifications ============ */
-  function ensureComments(contestId){
-    if(state.comments[contestId]) return state.comments[contestId];
-    const def = contestDef(contestId);
-    const rng = mulberry32(hashStr(contestId));
-    const n = 2 + Math.floor(rng()*4);
-    const pool = LB_SEED.slice();
-    const list = [];
-    for(let i=0;i<n;i++){
-      const person = pool.splice(Math.floor(rng()*pool.length),1)[0] || {name:'Anon Player'};
-      const sideKey = rng() < 0.55 ? 'yes' : 'no';
-      const sideLabel = sideKey==='yes' ? def.yes : def.no;
-      const tmpl = COMMENT_TEMPLATES[Math.floor(rng()*COMMENT_TEMPLATES.length)];
-      const hrsAgo = 1 + Math.floor(rng()*47);
-      const likes = Math.floor(rng()*24);
-      list.push({ who:person.name, txt:tmpl.replace('{side}', sideLabel), hrsAgo, side:sideKey, likes, likedByMe:false });
-    }
-    list.sort((a,b)=>a.hrsAgo-b.hrsAgo);
-    state.comments[contestId] = list;
-    return list;
-  }
+  function ensureComments(contestId){ return state.comments[contestId] || (state.comments[contestId] = []); }
 
   /* ============ debate attachments: photo / video / voice note ============
      PROTOTYPE NOTE: this demo enforces "no explicit or graphic content" via
@@ -639,7 +501,7 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       const withPct = state._hookChoice==='yes' ? yesPct : noPct;
       return '<div class="ob">'
         +'<div class="ob-logo"><div class="ring" style="font-size:34px;">✨</div><h1>Nice pick!</h1><p>You’re with <strong>'+withPct+'%</strong> of players on &ldquo;'+esc(def.title)+'&rdquo;.</p></div>'
-        +'<div class="callout"><strong>+30 pts</strong> &mdash; first foresight bonus, already credited to your wallet.</div>'
+        +'<div class="callout"><strong>+30 pts</strong> &mdash; first forecast reward, already credited to your wallet.</div>'
         +'<button class="btn btn-primary btn-block" id="btnContinueToWelcome" style="margin-top:8px;">Continue</button>'
         +'<div class="step-dots">'+dotsHtml+'</div></div>';
     }
@@ -728,21 +590,49 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
 
   /* ============ home / contests ============ */
   function statusChip(c){
+    const def = contestDef(c.id);
     if(c.status==='resolved') return '<span class="chip chip-status-muted"><span class="chip-dot"></span>Resolved</span>';
-    const diff = contestDef(c.id).closes - liveNow();
+    if(def && def.status==='paused') return '<span class="chip chip-status-muted"><span class="chip-dot"></span>Paused</span>';
+    const diff = def && def.closes ? def.closes - liveNow() : Infinity;
+    if(diff <= 0) return '<span class="chip chip-status-muted"><span class="chip-dot"></span>Closed</span>';
     if(diff < 24*3600000) return '<span class="chip chip-status-warn"><span class="chip-dot"></span>Closing soon</span>';
     return '<span class="chip chip-status-good"><span class="chip-dot"></span>Open</span>';
   }
   function closesText(def){
+    if(!def || !def.closes) return '';
     const diff = def.closes - liveNow();
     if(diff<=0) return 'Closed';
+    if(diff < 3600000) return Math.max(1, Math.floor(diff/60000))+'m left';
     const days = Math.floor(diff/86400000), hrs = Math.floor((diff%86400000)/3600000);
     return days>=1 ? days+'d '+hrs+'h left' : hrs+'h left';
   }
+  function chancePct(def, key){
+    const v = def && def.chance ? def.chance[key] : null;
+    return (v===null || v===undefined) ? null : Math.round(v*100);
+  }
+  function callsText(n){ return fmtNum(n)+' call'+(n===1?'':'s'); }
+  function chanceBlock(def){
+    if(def.chanceHidden) return '<div class="prob-row"><span class="prob-lbl">Live chance paused for the election period</span></div>';
+    const p = chancePct(def, 'yes');
+    if(p===null) return '<div class="prob-row"><span class="prob-lbl">No calls yet &mdash; be the first</span></div><div class="prob-bar empty"><i style="width:0%;"></i></div>';
+    return '<div class="prob-row"><span class="prob-num">'+p+'%</span><span class="prob-lbl">chance of &ldquo;'+esc(def.yes)+'&rdquo;</span></div>'
+      + '<div class="prob-bar"><i style="width:'+p+'%;"></i></div>';
+  }
+  function feedStateHtml(){
+    if(state.feedStatus==='error'){
+      const e = state.feedError || {};
+      return '<div class="feed-state error" role="alert"><b>Couldn&rsquo;t load questions.</b><span>'+esc(e.message || 'Please try again.')+'</span>'
+        + (e.correlationId ? '<span class="ref">Ref: '+esc(e.correlationId)+'</span>' : '')
+        + '<button class="btn btn-sm" id="btnRetryFeed">Try again</button></div>';
+    }
+    return '<div class="feed-state loading" role="status"><span class="spinner" aria-hidden="true"></span>Loading questions&hellip;</div>';
+  }
+  function feedReady(){ return state.feedStatus==='ready' || state.feedStatus==='refreshing'; }
 
   // Shown right on Home so a prize catalogue is the first thing a player sees
   // after signing in — the "what could I win" hook, before any topic list.
   function renderHomePrizeStrip(){
+    if(!state.flags.prizes) return '';
     const cards = WINNER_PRIZES.map(p=>
       '<div class="hp-card"><span class="ic">'+p.icon+'</span><b>'+esc(p.name)+'</b><span class="tier">'+esc(p.tier)+'</span></div>'
     ).join('');
@@ -753,59 +643,58 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     const q = (state.searchQuery||'').trim().toLowerCase();
     let filtered = state.contests.filter(c => {
       const def = contestDef(c.id);
+      if(!def) return false;
       if(state.catFilter!=='all' && def.category!==state.catFilter) return false;
       if(q && !(def.title.toLowerCase().includes(q) || def.desc.toLowerCase().includes(q))) return false;
       return true;
     });
     filtered = filtered.slice().sort((a,b)=>{
-      if(state.sortMode==='trending'){
-        return (b.pool.yes+b.pool.no) - (a.pool.yes+a.pool.no);
-      }
-      return contestDef(a.id).closes - contestDef(b.id).closes;
+      const da = contestDef(a.id), db = contestDef(b.id);
+      if(state.sortMode==='trending') return (db.participants - da.participants) || (da.closes - db.closes);
+      return da.closes - db.closes;
     });
-    const cards = filtered.map(c=>{
-      const def = contestDef(c.id);
-      const cat = CAT_MAP[def.category];
-      const total = c.pool.yes + c.pool.no;
-      const yesPct = Math.round((c.pool.yes/total)*100);
-      const mine = state.predictions[c.id];
-      return '<div class="contest-card" data-open-contest="'+c.id+'">'
-        +(def.sponsor ? '<span class="sponsor-chip"><span class="mk">'+esc(def.sponsor[0])+'</span>Sponsored by '+esc(def.sponsor)+'</span>' : '')
-        +(def.creator ? '<span class="creator-chip"><span class="mk">'+esc((def.creator||'A')[0])+'</span>Poll by '+esc(def.creator)+'</span>' : '')
+    let cards;
+    if(!feedReady()) cards = feedStateHtml();
+    else if(!state.contests.length) cards = '<div class="feed-state"><b>No open questions right now.</b><span>New questions are added through the day &mdash; check back soon.</span></div>';
+    else cards = filtered.map(c=>{
+      const def = contestDef(c.id), cat = CAT_MAP[def.category], mine = state.predictions[c.id];
+      return '<div class="contest-card" data-open-contest="'+esc(c.id)+'" role="button" tabindex="0">'
         +'<div class="row1"><span class="chip" style="background:color-mix(in srgb, '+cat.color+' 16%, transparent); color:'+cat.color+';"><span class="chip-dot"></span>'+cat.label+'</span>'+statusChip(c)+'</div>'
         +'<h4>'+esc(def.title)+'</h4>'
-        +'<div class="prob-row"><span class="prob-num">'+yesPct+'%</span><span class="prob-lbl">chance of &ldquo;'+esc(def.yes)+'&rdquo;'+(mine?' &middot; you foresaw':'')+'</span></div>'
-        +'<div class="prob-bar"><i style="width:'+yesPct+'%;"></i></div>'
-        +'<div class="meta"><span>'+(c.status==='resolved' ? ('Result: '+(c.resolvedOption==='yes'?def.yes:def.no)) : closesText(def))+'</span><span class="vol">'+fmtNum(total)+' pts in play</span></div>'
+        + chanceBlock(def)
+        +'<div class="meta"><span>'+closesText(def)+(mine?' &middot; you called':'')+'</span><span class="vol">'+callsText(def.participants)+'</span></div>'
         +'</div>';
-    }).join('') || '<p class="hint">No topics match — try another category or search term.</p>';
+    }).join('') || '<p class="hint">No questions match &mdash; try another category or search term.</p>';
 
     const filters = '<div class="cat-filters">'
       + '<button data-filter="all" class="'+(state.catFilter==='all'?'active':'')+'">All</button>'
       + CATS.map(c=>'<button data-filter="'+c.key+'" class="'+(state.catFilter===c.key?'active':'')+'"><span class="cat-dot" style="background:'+c.color+';"></span>'+c.label+'</button>').join('')
       + '</div>';
 
-    const activity = '<div class="activity-strip"><div class="hd"><h3><span class="live-label"><span class="live-dot"></span>Live activity</span></h3></div>'
-      + (state.activity.length
-          ? state.activity.slice(0,5).map(a=>'<div class="act-row">'+a.text+'<span class="t">'+a.ts+'</span></div>').join('')
-          : '<div class="act-row" style="border-bottom:0;">Markets tick on their own — leave this open and watch it fill in.</div>')
-      + '</div>';
-
-    return '<div class="greet"><div><h2>Namaste, '+esc(state.user.name)+(state.selfieVerified?' '+verifiedBadgeIcon():'')+' '+rankBadgeChip(balance())+(state.plus?' <span class="plus-badge">'+(state.plusTier==='pro'?'Plus Pro':'Plus')+'</span>':'')+'</h2><div class="sub">'+state.contests.filter(c=>c.status==='open').length+' topics open &middot; '+formatDateLong(liveNow())+'</div></div></div>'
+    const openCount = state.contests.filter(c=>c.status==='open').length;
+    const sub = feedReady() ? openCount+' question'+(openCount===1?'':'s')+' open &middot; '+formatDateLong(liveNow()) : formatDateLong(liveNow());
+    return '<div class="greet"><div><h2>Namaste, '+esc(state.user.name)+(state.selfieVerified?' '+verifiedBadgeIcon():'')+' '+rankBadgeChip(lifetimeEarned())+(state.flags.plus && state.plus?' <span class="plus-badge">'+(state.plusTier==='pro'?'Plus Pro':'Plus')+'</span>':'')+'</h2><div class="sub">'+sub+'</div></div></div>'
       + '<div class="balance-card"><div class="k">Foreseez Points</div><div class="v mono">'+fmtNum(balance())+'</div></div>'
       + renderHomePrizeStrip()
       + renderNewsTicker()
-      + '<div class="search-row"><input id="searchInput" type="search" placeholder="Search topics…" value="'+esc(state.searchQuery||'')+'">'
+      + '<div class="search-row"><input id="searchInput" type="search" placeholder="Search questions…" aria-label="Search questions" value="'+esc(state.searchQuery||'')+'">'
       + '<div class="sort-toggle"><button data-sort="closing" class="'+(state.sortMode==='closing'?'active':'')+'">Closing soon</button><button data-sort="trending" class="'+(state.sortMode==='trending'?'active':'')+'">Trending</button></div></div>'
-      + filters + activity + '<div>' + cards + '</div>';
+      + filters + '<div>' + cards + '</div>';
+  }
+  function tickerItem(n, duplicate){
+    const cat = CAT_MAP[n.category] || { color:'var(--ink-muted)' };
+    const linked = n.question_id && contestDef(n.question_id) ? ' data-open-contest="'+esc(n.question_id)+'"' : '';
+    return '<a class="news-item" href="'+esc(n.link)+'" target="_blank" rel="noopener noreferrer"'+linked+(duplicate?' tabindex="-1"':'')+'>'
+      + '<span class="cat-dot" style="background:'+cat.color+';"></span>'+esc(n.title)+' <span class="news-src">'+esc(n.source)+'</span></a>';
   }
   function renderNewsTicker(){
-    const items = (state.newsFeed||[]).slice(0,10).map(n=>{
-      const cat = CAT_MAP[n.cat];
-      return '<span class="news-item"><span class="cat-dot" style="background:'+cat.color+';"></span>'+esc(n.text)+'</span>';
-    }).join('<span class="news-sep">&bull;</span>');
-    return '<div class="news-ticker"><div class="news-hd"><span class="live-label"><span class="live-dot"></span>Context feed</span><span class="news-note">Illustrative headlines, not a live news connection</span></div>'
-      + '<div class="news-track-wrap"><div class="news-track">'+items+'<span class="news-sep">&bull;</span>'+items+'</div></div></div>';
+    const list = (state.newsFeed||[]).slice(0,12);
+    if(!list.length) return '';
+    const sep = '<span class="news-sep" aria-hidden="true">&bull;</span>';
+    const first = list.map(n=>tickerItem(n,false)).join(sep);
+    const second = list.map(n=>tickerItem(n,true)).join(sep);
+    return '<div class="news-ticker"><div class="news-hd"><span class="live-label"><span class="live-dot"></span>Context feed</span><span class="news-note">'+esc(state.newsAttribution)+'</span></div>'
+      + '<div class="news-track-wrap"><div class="news-track">'+first+sep+'<span aria-hidden="true">'+second+'</span></div></div></div>';
   }
 
   // Pulse: the product's actual differentiator made visible on-screen. Every
@@ -815,141 +704,126 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
   // inside individual contest cards. Framed explicitly as "not a market" so
   // it reads as a data/insights product, not a Kalshi/Polymarket clone.
   function pulseStats(){
-    const open = state.contests.filter(c=>c.status==='open');
+    const open = state.contests.filter(c=>c.status==='open').map(c=>contestDef(c.id)).filter(Boolean);
     const byCat = {};
-    CATS.forEach(cat=>{ byCat[cat.key] = { vol:0, count:0, confSum:0 }; });
-    let totalVol = 0;
+    CATS.forEach(cat=>{ byCat[cat.key] = { count:0, calls:0, leanSum:0, leanN:0 }; });
+    let totalCalls = 0;
     const ranked = [];
-    open.forEach(c=>{
-      const def = contestDef(c.id);
-      const total = c.pool.yes + c.pool.no;
-      if(!total) return;
-      const yesPct = Math.round((c.pool.yes/total)*100);
-      const conf = Math.max(yesPct, 100-yesPct);
+    open.forEach(def=>{
       const b = byCat[def.category];
-      b.vol += total; b.count += 1; b.confSum += conf;
-      totalVol += total;
-      ranked.push({ id:c.id, def, yesPct, conf, total });
+      if(!b) return;
+      b.count += 1; b.calls += def.participants; totalCalls += def.participants;
+      const p = chancePct(def, 'yes');
+      if(p!==null && !def.chanceHidden && def.participants >= MIN_GROUP){
+        const lean = Math.max(p, 100-p);
+        b.leanSum += lean*def.participants; b.leanN += def.participants;
+        ranked.push({ id:def.id, def, conf:lean, total:def.participants });
+      }
     });
-    return { open, byCat, totalVol, ranked };
+    return { open, byCat, totalCalls, ranked };
   }
   function renderPulse(){
-    const { open, byCat, totalVol, ranked } = pulseStats();
+    const head = '<div class="dash-head"><div><h2 style="font-size:19px;">Pulse &mdash; what India foresees</h2>'
+      + '<p>Aggregated across every open question. No money, no trading &mdash; this is what the crowd believes, captured before the answer is known.</p></div>'
+      + '<span class="live-label"><span class="live-dot"></span>Live</span></div>';
+    if(!feedReady()) return head + feedStateHtml();
+    const { open, byCat, totalCalls, ranked } = pulseStats();
     const activeCats = CATS.filter(cat => byCat[cat.key].count);
-
     const tiles = activeCats.map(cat=>{
       const b = byCat[cat.key];
-      const avgConf = Math.round(b.confSum / b.count);
+      const enough = b.calls >= MIN_GROUP && b.leanN > 0;
       return '<div class="tile callout" style="border-color:color-mix(in srgb, '+cat.color+' 35%, var(--border));">'
         + '<div class="top"><span class="cat-dot" style="background:'+cat.color+';"></span>'+cat.label+'</div>'
-        + '<div class="val">'+avgConf+'%</div>'
-        + '<div class="delta" style="color:var(--ink-muted); font-weight:600;">avg. lean to larger side</div>'
-        + '<div class="hint" style="margin-top:6px;">'+b.count+' live question'+(b.count===1?'':'s')+' &middot; '+fmtNum(b.vol)+' pts reflected</div>'
+        + (enough
+            ? '<div class="val">'+Math.round(b.leanSum/b.leanN)+'%</div><div class="delta" style="color:var(--ink-muted); font-weight:600;">average lean to the larger side</div>'
+            : '<div class="val" style="font-size:15px;">Gathering calls</div><div class="delta" style="color:var(--ink-muted); font-weight:600;">Shown once '+MIN_GROUP+'+ calls are in</div>')
+        + '<div class="hint" style="margin-top:6px;">'+b.count+' open question'+(b.count===1?'':'s')+' &middot; '+callsText(b.calls)+'</div>'
         + '</div>';
     }).join('');
-
     function insightRow(r){
       const cat = CAT_MAP[r.def.category];
-      return '<div class="feed-row" data-open-contest="'+r.id+'" style="cursor:pointer;">'
+      return '<div class="feed-row" data-open-contest="'+esc(r.id)+'" role="button" tabindex="0" style="cursor:pointer;">'
         + '<span class="who"><span class="cat-dot" style="background:'+cat.color+'; margin-right:6px;"></span>'+esc(r.def.title)+'</span>'
-        + '<span class="meta">'+r.conf+'% lean &middot; '+fmtNum(r.total)+' pts</span></div>';
+        + '<span class="meta">'+r.conf+'% lean &middot; '+callsText(r.total)+'</span></div>';
     }
     const decisive = ranked.slice().sort((a,b)=>b.conf-a.conf).slice(0,3);
     const contested = ranked.slice().sort((a,b)=>a.conf-b.conf).slice(0,3);
-
-    return '<div class="dash-head"><div><h2 style="font-size:19px;">Pulse &mdash; what India foresees</h2>'
-      + '<p>Aggregated live across every open question. Not odds, not a trade &mdash; this is what the crowd believes, captured before the answer is known.</p></div>'
-      + '<span class="live-label"><span class="live-dot"></span>Live</span></div>'
-      + '<div class="callout" style="margin-bottom:16px;"><strong>'+fmtNum(totalVol)+' points</strong> reflected across <strong>'+open.length+' open question'+(open.length===1?'':'s')+'</strong> in '+activeCats.length+' categories right now. This is the licensable sentiment product from the pitch, made visible &mdash; not a separate feature bolted on.</div>'
-      + '<div class="tiles">'+tiles+'</div>'
+    const thin = '<p class="hint">Appears once a question has '+MIN_GROUP+'+ calls.</p>';
+    return head
+      + '<div class="callout" style="margin-bottom:16px;"><strong>'+callsText(totalCalls)+'</strong> across <strong>'+open.length+' open question'+(open.length===1?'':'s')+'</strong> in '+activeCats.length+' categor'+(activeCats.length===1?'y':'ies')+'. Readings appear only for groups of '+MIN_GROUP+' or more, so no individual call can be singled out.</div>'
+      + (tiles ? '<div class="tiles">'+tiles+'</div>' : '<p class="hint">No open questions right now.</p>')
       + '<div class="chart-card callout"><h3 style="margin-bottom:2px;">Most decisive</h3><p class="hint" style="margin-bottom:8px;">Where the crowd is most confident.</p>'
-      + (decisive.map(insightRow).join('') || '<p class="hint">Not enough live questions yet.</p>') + '</div>'
-      + '<div class="chart-card callout"><h3 style="margin-bottom:2px;">Most contested</h3><p class="hint" style="margin-bottom:8px;">Where the crowd is genuinely split &mdash; 50/50 territory.</p>'
-      + (contested.map(insightRow).join('') || '<p class="hint">Not enough live questions yet.</p>') + '</div>'
-      + '<p class="news-note" style="margin-top:2px; margin-bottom:14px;">Prototype note: activity volumes are simulated demo data, the same seed used everywhere else in this app &mdash; the aggregation mechanic itself (live pool &rarr; live consensus read) is real, and is what a production backend would scale into the licensed brand-insights product.</p>';
+      + (decisive.map(insightRow).join('') || thin) + '</div>'
+      + '<div class="chart-card callout"><h3 style="margin-bottom:2px;">Most contested</h3><p class="hint" style="margin-bottom:8px;">Where the crowd is split down the middle.</p>'
+      + (contested.map(insightRow).join('') || thin) + '</div>';
   }
 
   function renderContestSheet(id){
     const def = contestDef(id);
-    const c = state.contests.find(x=>x.id===id);
+    if(!def) return { title:'Question', body:'<p class="hint">This question is no longer available.</p>' };
+    const c = state.contests.find(x=>x.id===id) || { status:'open' };
     const cat = CAT_MAP[def.category];
-    const total = c.pool.yes + c.pool.no;
-    const yesPct = Math.round((c.pool.yes/total)*100), noPct = 100-yesPct;
-    const yesMult = (total/c.pool.yes).toFixed(2), noMult = (total/c.pool.no).toFixed(2);
+    const yesPct = chancePct(def, 'yes');
+    const noPct = yesPct===null ? null : 100 - yesPct;
     const mine = state.predictions[id];
     const sel = state._sheetSel || (mine ? mine.option : null);
-    const stakeAmt = (state._sheetStake===undefined || state._sheetStake===null) ? 50 : state._sheetStake;
+    const amt = (state._sheetStake===undefined || state._sheetStake===null) ? 50 : state._sheetStake;
+    const isOpen = c.status==='open' && def.status==='open' && def.closes && def.closes > liveNow();
+    const res = def.resolution || {};
 
-    let body = (def.sponsor ? '<span class="sponsor-chip"><span class="mk">'+esc(def.sponsor[0])+'</span>Sponsored by '+esc(def.sponsor)+'</span><br>' : '')
-      + (def.creator ? '<span class="creator-chip"><span class="mk">'+esc((def.creator||'A')[0])+'</span>Poll by '+esc(def.creator)+'</span><br>' : '')
-      + '<span class="chip" style="background:color-mix(in srgb, '+cat.color+' 16%, transparent); color:'+cat.color+'; margin-bottom:8px;"><span class="chip-dot"></span>'+cat.label+'</span>'
+    let body = '<span class="chip" style="background:color-mix(in srgb, '+cat.color+' 16%, transparent); color:'+cat.color+'; margin-bottom:8px;"><span class="chip-dot"></span>'+cat.label+'</span>'
       + '<h3 style="font-size:15.5px; margin-top:4px;">'+esc(def.title)+'</h3>'
-      + '<p style="font-size:12.5px; color:var(--ink-2); line-height:1.55;">'+esc(def.desc)+'</p>'
-      + '<div class="prob-bar" style="margin-top:10px;"><i style="width:'+yesPct+'%;"></i></div>'
-      + '<div class="meta" style="margin-top:4px; display:flex; justify-content:space-between;"><span>'+yesPct+'% Yes</span><span class="vol">'+fmtNum(total)+' pts in play</span></div>'
-      + (def.campaignId ? '<button class="btn btn-sm" data-open-campaign="'+def.campaignId+'" style="margin-top:10px; width:100%; background:color-mix(in srgb, var(--cat-brand) 14%, var(--surface)); border-color:color-mix(in srgb, var(--cat-brand) 45%, var(--border)); color:var(--cat-brand);">🏆 Real prizes for the top 5 — view campaign &amp; leaderboard</button>' : '');
+      + (def.desc ? '<p style="font-size:12.5px; color:var(--ink-2); line-height:1.55;">'+esc(def.desc)+'</p>' : '')
+      + (def.context && def.context.link ? '<p class="hint">Context: <a href="'+esc(def.context.link)+'" target="_blank" rel="noopener noreferrer">'+esc(def.context.headline)+'</a></p>' : '')
+      + chanceBlock(def)
+      + '<div class="meta" style="margin-top:4px; display:flex; justify-content:space-between;"><span>'+closesText(def)+'</span><span class="vol">'+callsText(def.participants)+'</span></div>'
+      + '<div class="resolve-box"><h4>How this resolves</h4><p>'+esc(res.rule || '')+'</p>'
+      + (res.source_url ? '<a href="'+esc(res.source_url)+'" target="_blank" rel="noopener noreferrer">Official source &rarr;</a>' : '')
+      + '</div>';
 
-    if(c.status==='resolved'){
-      const won = mine && mine.option===c.resolvedOption;
-      body += '<div class="callout" style="margin-top:10px;"><strong>Resolved: '+(c.resolvedOption==='yes'?def.yes:def.no)+'</strong><br>'
-        + (mine ? (won ? 'Your foresight was correct — reward credited to your ledger.' : 'Your foresight did not match — no reward, your committed points were not returned.') : 'You did not submit a foresight on this topic.')
-        + '</div>';
+    if(!isOpen){
+      body += '<div class="callout" style="margin-top:10px;">'+(def.status==='paused'
+        ? 'Calls are paused on this question for now.'
+        : 'This question has closed. The result will be confirmed from the official source above.')+'</div>';
     } else {
       body += '<div class="opt-grid" style="margin-top:12px;">'
-        + optBtn('yes', def.yes, yesPct, yesMult, sel, mine)
-        + optBtn('no', def.no, noPct, noMult, sel, mine)
+        + optBtn('yes', def.yes, yesPct, sel, mine)
+        + optBtn('no', def.no, noPct, sel, mine)
         + '</div>';
       if(mine){
-        body += '<div class="callout">You committed <strong>'+fmtNum(mine.staked)+' pts</strong> to &ldquo;'+(mine.option==='yes'?def.yes:def.no)+'&rdquo;. Awaiting resolution.</div>';
+        body += '<div class="callout">You committed <strong>'+fmtNum(mine.staked)+' pts</strong> to &ldquo;'+esc(mine.option==='yes'?def.yes:def.no)+'&rdquo;. Awaiting the result.</div>';
       } else {
-        body += '<div class="field" style="margin-top:6px;"><label for="stakeInput">Points to commit</label><input class="mono" id="stakeInput" type="number" min="10" max="'+balance()+'" value="'+stakeAmt+'"></div>'
+        const limitHint = callsLeftToday()+' of '+dailyCallCap()+' daily calls left';
+        body += '<div class="field" style="margin-top:6px;"><label for="stakeInput">Points to commit</label><input class="mono" id="stakeInput" type="number" inputmode="numeric" min="10" max="'+balance()+'" value="'+esc(amt)+'"></div>'
           + '<div class="chip-row">'
           + [25,50,100,250].map(v=>'<button data-chip="'+v+'">'+v+'</button>').join('')
           + '<button data-chip="max">Max</button></div>'
           + '<button class="btn btn-primary btn-block" id="btnPlacePrediction" '+(sel&&callsLeftToday()>0?'':'disabled')+'>Make your call</button>'
-          + '<p class="hint" style="margin:8px 0 0; text-align:center;">'+(state.plusTier==='pro' ? 'Unlimited daily calls' : callsLeftToday()+' of '+dailyCallCap()+' daily calls left &middot; '+(state.plus?'Plus Pro removes the limit':'Plus raises it to '+DAILY_CALL_LIMITS.plus))+'</p>';
+          + '<p class="hint" style="margin:8px 0 0; text-align:center;">'+limitHint+'</p>'
+          + '<p class="news-note" style="margin-top:8px; text-align:center;">Preview: calls stay on this device and don&rsquo;t count toward the public chance until sign-in launches.</p>';
       }
-      body += '<details class="demo-ctl"><summary>Demo: simulate the real&#8209;world result</summary><div class="inner">'
-        + '<p class="hint" style="margin:0;">Stands in for the Foresight Resolution Service ingesting a verified outcome. Pick what actually happened:</p>'
-        + '<button class="btn btn-sm" data-resolve="yes">Resolve as: '+def.yes+'</button>'
-        + '<button class="btn btn-sm" data-resolve="no">Resolve as: '+def.no+'</button>'
-        + '</div></details>';
     }
-
-    const comments = ensureComments(id);
-    body += '<div class="discuss"><h4>Debate &middot; '+comments.length+'</h4>'
-      + comments.map((cm,i)=>{
-          const badge = cm.side ? '<span class="side-badge '+cm.side+'">'+esc(cm.side==='yes'?def.yes:def.no)+'</span>' : '';
-          return '<div class="comment-row"><div class="row-top"><span class="who">'+esc(cm.who)+'</span>'+badge+'<span class="t">'+cm.hrsAgo+'h ago</span></div>'
-            + (cm.txt ? '<span class="txt">'+esc(cm.txt)+'</span>' : '')
-            + renderCommentMedia(cm)
-            + '<button class="like-btn '+(cm.likedByMe?'on':'')+'" data-like-comment="'+i+'">&#9829; '+(cm.likes||0)+'</button>'
-            + (cm.media ? '<button class="report-link" data-report-comment="'+i+'" '+(cm.media.reported?'disabled':'')+'>'+(cm.media.reported?'Reported':'Report')+'</button>' : '')
-            + '</div>';
-        }).join('')
-      + renderCommentForm()
-      + '</div>';
-
+    body += '<div class="discuss"><h4>Debate</h4><p class="hint" style="margin:0;">Comments, replies and voice notes open with sign-in. Every post is checked before it appears.</p></div>';
     return { title: def.title, body };
   }
-  function optBtn(key,label,pct,mult,sel,mine){
+  function optBtn(key,label,pct,sel,mine){
     const disabled = !!mine;
     return '<button class="opt-btn '+key+' '+(sel===key?'sel':'')+'" data-opt="'+key+'" '+(disabled?'disabled style="opacity:.6;"':'')+'>'
-      + '<span class="lbl">'+esc(label)+'</span><span class="odds">'+pct+'%</span>'
-      + '<span style="font-size:10px; color:var(--ink-muted); font-weight:600;">'+mult+'&times; return if correct</span></button>';
+      + '<span class="lbl">'+esc(label)+'</span><span class="chance-val">'+(pct===null?'&mdash;':pct+'%')+'</span>'
+      + '<span style="font-size:10px; color:var(--ink-muted); font-weight:600;">current chance</span></button>';
   }
 
   /* ============ ledger / leaderboard / wallet / profile ============ */
   const LEDGER_META = {
-    signup:{label:'Signup bonus', color:'good'}, kyc:{label:'KYC bonus', color:'good'},
+    signup:{label:'Signup reward', color:'good'}, kyc:{label:'Verification reward', color:'good'},
     checkin:{label:'Daily check‑in', color:'good'}, stake:{label:'Points committed', color:'muted'},
-    win:{label:'Call correct', color:'good'}, lose:{label:'Call resolved', color:'muted'}, redeem:{label:'Prize redeemed', color:'muted'}
+    win:{label:'Call correct', color:'good'}, lose:{label:'Call resolved', color:'muted'}
   };
   function ledgerIcon(type){
     const good = type==='win'||type==='signup'||type==='kyc'||type==='checkin';
     const bg = good ? 'color-mix(in srgb, var(--status-good) 18%, transparent)' : 'var(--surface-3)';
     const fg = good ? 'var(--status-good)' : 'var(--ink-muted)';
-    const glyph = type==='stake' ? '&#8722;' : type==='redeem' ? '&#127873;' : good ? '&#8593;' : '&#8226;';
+    const glyph = type==='stake' ? '&#8722;' : good ? '&#8593;' : '&#8226;';
     return '<div class="ico" style="background:'+bg+'; color:'+fg+'; font-weight:700; font-size:14px;">'+glyph+'</div>';
   }
   function renderLedger(){
@@ -963,159 +837,40 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     return '<h2 style="font-size:16px; margin:14px 0 4px;">Points ledger</h2><p class="hint">Append‑only. Every earn, commitment and reward is a permanent event.</p><div class="card" style="padding:2px 14px; margin-top:8px;">'+rows+'</div>';
   }
 
-  // Campaign-scoped leaderboard: ranks players on ONE sponsored
-  // question's net points only, not the global all-time balance
-  // renderLeaderboard() below uses. The named top 5 are scored with the
-  // exact same pari-mutuel payout math as any other topic; the field behind
-  // them is simulated (same illustrative-data pattern as LB_SEED/tickLive
-  // elsewhere) purely so rank arithmetic ("you placed #N of ~3,180") has
-  // real numbers to count against. A production build would score this
-  // against live multi-user data instead.
-  function campaignField(campaignId){
-    const camp = CAMPAIGNS[campaignId];
-    const c = camp && state.contests.find(x=>x.id===camp.contestId);
-    if(!camp || !c || c.status!=='resolved') return null;
-    const total = c.pool.yes + c.pool.no, winPool = c.pool[c.resolvedOption];
-    const mult = winPool ? total/winPool : 1;
-    const top5 = (CAMPAIGN_TOP5[campaignId]||[]).map(p=>({
-      name:p.name, staked:p.staked, net:Math.round(p.staked*(mult-1)), verified:true
-    }));
-    const rng = mulberry32(hashStr(campaignId));
-    const restN = Math.max(0, camp.entrants - top5.length);
-    const rest = [];
-    for(let i=0;i<restN;i++){
-      const stake = Math.round(15 + Math.pow(rng(),5)*900);
-      const correct = rng() < camp.correctShare;
-      rest.push(correct ? Math.round(stake*(mult-1)) : -stake);
-    }
-    return { camp, contest:c, mult, top5, rest };
-  }
-  function renderCampaignSheet(campaignId){
-    const camp = CAMPAIGNS[campaignId];
-    const c = state.contests.find(x=>x.id===camp.contestId);
-    const def = contestDef(camp.contestId);
-    const resolved = c.status==='resolved';
-    const mine = state.predictions[camp.contestId];
-
-    let body = '<span class="sponsor-chip"><span class="mk">'+esc(camp.sponsor[0])+'</span>Sponsored by '+esc(camp.sponsor)+'</span>'
-      + '<h3 style="font-size:15.5px; margin-top:6px;">'+esc(camp.title)+'</h3>'
-      + '<p style="font-size:12.5px; color:var(--ink-2); line-height:1.55;">'+esc(camp.blurb)+'</p>';
-
-    body += '<div style="display:flex; flex-direction:column; gap:8px; margin-top:12px;">'
-      + camp.prizes.map(p=>'<div class="winner-card" style="flex-direction:row; align-items:center; gap:10px;"><span class="ic">'+p.icon+'</span><div style="flex:1; display:flex; flex-direction:column; gap:2px;"><b>Rank '+p.rank+' &mdash; '+esc(p.name)+'</b><span class="hint">'+esc(p.value)+'</span></div></div>').join('')
-      + '</div>';
-
-    body += '<details class="demo-ctl"><summary>How is the campaign leaderboard calculated?</summary><div class="inner">'
-      + '<p class="hint" style="margin:0;">Ranked by <strong>'+esc(camp.rankedBy)+'</strong> &mdash; the same pari&#8209;mutuel payout every topic uses (points committed &times; total&frasl;winning pool), just scored on this one question. Real prizes for the top 5, never purchased or point&#8209;redeemed &mdash; fulfilment requires the same selfie/KYC verification every other prize in this app requires.</p>'
-      + '</div></details>';
-
-    if(!resolved){
-      body += '<div class="callout" style="margin-top:12px;">This campaign question is still open &mdash; the leaderboard finalizes once it resolves.'+(mine?'':' You haven&rsquo;t foreseen on it yet.')+'</div>'
-        + '<button class="btn btn-primary btn-block" data-open-contest="'+camp.contestId+'" style="margin-top:8px;">'+(mine?'View the question':'Make your call')+'</button>';
-    } else {
-      const field = campaignField(campaignId);
-      const winLabel = c.resolvedOption==='yes' ? def.yes : def.no;
-      body += '<div class="callout" style="margin-top:12px;"><strong>Resolved: '+esc(winLabel)+'</strong> &middot; '+fmtNum(camp.entrants)+' players on this campaign question.</div>';
-
-      // Rank the real signed-in user against the FULL field (named top 5 +
-      // the simulated rest) for their overall placement — then, separately,
-      // merge them into the displayed top-5 table itself if their net
-      // actually clears it, so the table never shows a stale name outranked
-      // by the real player sitting just below it.
-      const myNet = mine ? state.ledger.filter(e=>e.contestId===camp.contestId).reduce((s,e)=>s+e.amount,0) : null;
-      const candidates = field.top5.map(p=>({name:p.name, net:p.net, verified:true, me:false}))
-        .concat(mine ? [{name:state.user.name||'You', net:myNet, verified:state.selfieVerified, me:true}] : []);
-      candidates.sort((a,b)=>b.net-a.net);
-      const displayTop5 = candidates.slice(0,5);
-
-      const head = '<div class="lb-head"><span class="rank">#</span><span class="av"></span><span class="nm">Player</span><span class="rw">Prize</span><span class="pt">Pts won</span></div>';
-      const rows = displayTop5.map((p,i)=>{
-        const prize = camp.prizes[i];
-        return '<div class="lb-row '+(p.me?'me':'')+'"><span class="rank">'+(i+1)+'</span><span class="av">'+(p.me?'YOU':esc(p.name.split(' ').map(w=>w[0]).join('')))+'</span><span class="nm"><b>'+(p.me?'You':esc(p.name))+'</b> '+(p.verified?verifiedBadgeIcon():'')+'</span><span class="rw">'+esc(prize.icon)+' '+esc(prize.name)+'</span><span class="pt mono">+'+fmtNum(p.net)+'</span></div>';
-      }).join('');
-
-      body += '<h4 style="font-size:12.5px; margin:14px 0 4px; color:var(--ink-2);">Campaign leaderboard &mdash; top 5</h4>'
-        + '<div class="card" style="padding:6px 10px;">'+head+rows+'</div>';
-
-      if(mine){
-        const beatenBy = field.top5.map(p=>p.net).concat(field.rest).filter(v=>v>myNet).length;
-        const myRank = beatenBy + 1;
-        const inTop5 = myRank<=5;
-        body += '<div class="callout" style="margin-top:10px;'+(inTop5?' border-color:var(--accent);':'')+'">'
-          + '<strong>Your result:</strong> '+(myNet>=0?'+':'')+fmtNum(myNet)+' pts on this question &mdash; placed <strong>#'+fmtNum(myRank)+'</strong> of '+fmtNum(camp.entrants+1)+'.'
-          + (inTop5
-              ? (state.selfieVerified
-                  ? ' You&rsquo;re inside the prize band &mdash; your KYC is verified, so fulfilment can proceed.'
-                  : ' You&rsquo;re inside the prize band, but prize fulfilment needs your identity verified first &mdash; complete selfie verification in Profile to claim it.')
-              : ' Outside the top 5 this time &mdash; a bigger foresight on a correct call is what closes that gap, same as any other topic.')
-          + '</div>';
-      } else {
-        body += '<p class="hint" style="margin-top:8px;">You didn&rsquo;t make a foresight on this campaign&rsquo;s question, so you&rsquo;re not scored on it.</p>';
-      }
-      body += '<p class="news-note" style="margin-top:10px;">Prototype note: the named top 5 use the same live payout math as every topic; the remaining field behind them is simulated so rank arithmetic has real numbers to count against &mdash; a production build would score this against live multi&#8209;user data, with fulfilment reviewed against KYC before any prize ships.</p>';
-    }
-
-    return { title: camp.title, body };
-  }
   function renderLeaderboard(){
-    const list = LB_SEED.map(p=>({name:p.name, pts:(state.lbPoints&&state.lbPoints[p.name]!==undefined)?state.lbPoints[p.name]:p.pts, me:false, verified:!!p.verified})).concat([{name:state.user.name||'You', pts:balance(), me:true, verified:state.selfieVerified}]);
-    list.sort((a,b)=>b.pts-a.pts);
-    const head = '<div class="lb-head"><span class="rank">#</span><span class="av"></span><span class="nm">Player</span><span class="rw">Reward unlocked</span><span class="pt">Points</span></div>';
-    const rows = list.map((p,i)=>{
-      const prize = bestPrizeFor(p.pts);
-      const rewardTxt = prize ? esc(prize.short) : 'Keep foreseeing';
-      return '<div class="lb-row '+(p.me?'me':'')+'"><span class="rank">'+(i+1)+'</span><span class="av">'+(p.me?'YOU':p.name.split(' ').map(w=>w[0]).join(''))+'</span><span class="nm"><b>'+(p.me?'You':esc(p.name))+(p.verified?' '+verifiedBadgeIcon():'')+'</b>'+rankBadgeChip(p.pts, true)+'</span><span class="rw">'+rewardTxt+'</span><span class="pt mono">'+fmtNum(p.pts)+'</span></div>';
-    }).join('');
-    return '<h2 style="font-size:16px; margin:14px 0 4px;">Leaderboard</h2><p class="hint" style="margin-bottom:8px;">Reward unlocked shows the highest non&#8209;cash prize each rank could redeem today &mdash; earned, never bought. Top monthly ranks also win Winner Prizes — see Wallet.</p><div class="card" style="padding:6px 10px;">'+head+rows+'</div>';
+    return '<h2 style="font-size:16px; margin:14px 0 4px;">Leaderboards</h2>'
+      + '<p class="hint" style="margin-bottom:10px;">Daily, weekly and all-time rankings by lifetime points earned &mdash; committing points to a call never lowers your rank.</p>'
+      + renderRankCard()
+      + '<div class="feed-state"><b>Rankings open with sign-in.</b><span>Once calls are recorded, you&rsquo;ll see where you stand against everyone forecasting on Bharat Foreseez.</span></div>';
   }
   function renderWallet(){
-    const prizes = PRIZES.map(p=>{
-      const owned = state.redeemed[p.id];
-      const can = balance() >= p.cost && !owned;
-      return '<div class="prize-card"><span class="tag">'+p.tag+'</span><b>'+p.name+'</b><span class="hint">'+p.desc+'</span>'
-        + '<span class="cost mono">'+fmtNum(p.cost)+' pts</span>'
-        + '<button class="btn btn-sm" data-redeem="'+p.id+'" '+(owned||!can?'disabled':'')+'>'+(owned?'Redeemed':'Redeem')+'</button></div>';
-    }).join('');
-    const winnerPrizes = WINNER_PRIZES.map(p=>{
-      return '<div class="winner-card"><span class="ic">'+p.icon+'</span><span class="tag">'+esc(p.tag)+'</span><b>'+esc(p.name)+'</b><span class="hint">'+esc(p.desc)+'</span><span class="tier">'+esc(p.tier)+'</span></div>';
-    }).join('');
-    return '<h2 style="font-size:16px; margin:14px 0 4px;">Wallet</h2>'
+    let html = '<h2 style="font-size:16px; margin:14px 0 4px;">Wallet</h2>'
       + '<div class="balance-card" style="margin-top:8px;"><div class="k">Balance</div><div class="v mono">'+fmtNum(balance())+' pts</div></div>'
-      + '<div class="plus-card"><div class="hd"><b style="font-size:13.5px;">Foreseez Plus</b>'+(state.plusTier==='plus'?'<span class="plus-badge">Active</span>':'<span class="plus-badge" style="background:var(--baseline); color:var(--ink-2);">₹99/mo</span>')+'</div>'
-      + '<p>Flat monthly access fee — separate from anything you foresee, and never convertible into predictions or prizes. Unlocks an ad&#8209;free feed, a profile badge, a higher daily limit (25 calls a day instead of 10) and deeper accuracy analytics. It never buys or credits Foreseez Points; those stay earn&#8209;only, matching PROGA&rsquo;s Online Social Game path.</p>'
-      + (state.plusTier==='plus' ? '<button class="btn btn-sm" disabled>Subscribed</button>' : '<button class="btn btn-primary btn-sm" id="btnSubscribePlus">Subscribe to Plus — ₹99/mo (simulated)</button>')
-      + '</div>'
-      + '<div class="plus-card"><div class="hd"><b style="font-size:13.5px;">Foreseez Plus Pro</b>'+(state.plusTier==='pro'?'<span class="plus-badge">Active</span>':'<span class="plus-badge" style="background:var(--baseline); color:var(--ink-2);">₹249/mo</span>')+'</div>'
-      + '<p>Everything in Plus, with no daily limit on calls, plus early access to new prediction markets — elections, policy, geopolitics — before they open to everyone, and private leagues to run alongside friends. Still a flat access fee, not currency spent inside a prediction.</p>'
-      + (state.plusTier==='pro' ? '<button class="btn btn-sm" disabled>Subscribed</button>' : '<button class="btn btn-primary btn-sm" id="btnSubscribePlusPro">Subscribe to Plus Pro — ₹249/mo (simulated)</button>')
-      + '</div>'
-      + '<div class="plus-card" style="margin-bottom:14px;"><div class="hd"><b style="font-size:13.5px;">Run your own poll</b>'+(state.plus?'<span class="plus-badge">Plus</span>':'<span class="plus-badge" style="background:var(--baseline); color:var(--ink-2);">Plus only</span>')+'</div>'
-      + '<p>Ask consumers a Yes/No question of your own. It runs in the live feed and feeds straight into the same real&#8209;time sentiment pool as every other topic.</p>'
-      + (state.plus ? '<button class="btn btn-primary btn-sm" id="btnOpenCreatePoll">Create a poll</button>' : '<button class="btn btn-sm" disabled>Subscribe to Plus to unlock</button>')
-      + '</div>'
-      + renderMyPolls()
-      + '<div class="callout" style="margin-bottom:12px;"><strong>Foreseez Points are always earned, never sold.</strong> The only in&#8209;app purchases in this prototype are the Plus and Plus Pro subscriptions above — flat access fees to the app, never currency spent inside a prediction.</div>'
-      + '<div class="earn-item"><div><b>Daily check‑in</b><span>Come back once a day</span></div><button class="btn btn-sm" id="btnCheckin" '+(state.checkedIn?'disabled':'')+'>'+(state.checkedIn?'Done':'+50 pts')+'</button></div>'
-      + '<div class="earn-item"><div><b>Complete KYC</b><span>Name &amp; age verified</span></div><span class="chip chip-status-good">Earned</span></div>'
-      + '<h3 style="font-size:13px; margin:18px 0 4px;">Winner Prizes &mdash; top players</h3>'
-      + '<p class="hint" style="margin-bottom:8px;">Awarded — never purchased or point&#8209;redeemed — to the top&#8209;ranked players on the monthly leaderboard. Flagship devices plus free access to leading learning platforms, useful for students and university players using Bharat Foreseez as a study tool.</p>'
-      + '<div class="winner-grid" style="margin-bottom:18px;">'+winnerPrizes+'</div>'
-      + '<h3 style="font-size:13px; margin:18px 0 4px;">Sponsored Campaigns &mdash; real prizes</h3>'
-      + '<p class="hint" style="margin-bottom:8px;">A brand pays to run one question; the top 5 players on that question win prizes the brand supplies directly — separate from the Winner Prizes above.</p>'
-      + '<div style="display:flex; flex-direction:column; gap:8px; margin-bottom:18px;">' + Object.values(CAMPAIGNS).map(camp=>{
-          const cc = state.contests.find(x=>x.id===camp.contestId);
-          const status = cc && cc.status==='resolved' ? 'Resolved — leaderboard final' : 'Open now';
-          return '<div class="winner-card" style="flex-direction:row; align-items:center; gap:10px; cursor:pointer;" data-open-campaign="'+camp.id+'"><span class="ic">🏆</span><div style="flex:1;"><b>'+esc(camp.title)+'</b><span class="hint" style="display:block;">Sponsored by '+esc(camp.sponsor)+' &middot; '+status+'</span></div></div>';
-        }).join('') + '</div>'
-      + '<h3 style="font-size:13px; margin:18px 0 8px;">Redeem &mdash; non‑cash prizes only</h3>'
-      + '<div class="prize-grid">'+prizes+'</div>';
+      + '<div class="callout" style="margin-bottom:12px;"><strong>Foreseez Points are earned, never sold.</strong> They have no cash value and can&rsquo;t be bought, withdrawn or transferred. They are used only to make calls.</div>'
+      + '<div class="earn-item"><div><b>Daily check&#8209;in</b><span>A fixed reward, once a day</span></div><button class="btn btn-sm" id="btnCheckin" '+(state.checkedIn?'disabled':'')+'>'+(state.checkedIn?'Done':'+50 pts')+'</button></div>'
+      + '<div class="earn-item"><div><b>Age &amp; identity confirmed</b><span>One-time verification reward</span></div><span class="chip chip-status-good">Earned</span></div>';
+    if(state.flags.plus) html += renderPlusCards();
+    if(state.flags.user_created_polls) html += renderMyPolls();
+    if(state.flags.prizes) html += renderWinnerPrizes();
+    return html;
+  }
+  // Phase 2 (behind flags, off in Phase 1): Plus access tiers and partner prizes.
+  function renderPlusCards(){
+    return '<div class="plus-card"><div class="hd"><b style="font-size:13.5px;">Foreseez Plus</b>'+(state.plusTier==='plus'?'<span class="plus-badge">Active</span>':'')+'</div>'
+      + '<p>A flat monthly access fee. Unlocks an ad&#8209;free feed, a profile badge, a higher daily limit (25 calls instead of 10) and deeper accuracy statistics. It never buys or credits points.</p>'
+      + (state.plusTier ? '<button class="btn btn-sm" disabled>Subscribed</button>' : '<button class="btn btn-primary btn-sm" id="btnSubscribePlus">Subscribe to Plus</button>')
+      + '</div>';
+  }
+  function renderWinnerPrizes(){
+    const cards = WINNER_PRIZES.map(p=>'<div class="winner-card"><span class="ic">'+p.icon+'</span><span class="tag">'+esc(p.tag)+'</span><b>'+esc(p.name)+'</b><span class="hint">'+esc(p.desc)+'</span><span class="tier">'+esc(p.tier)+'</span></div>').join('');
+    return '<h3 style="font-size:13px; margin:18px 0 8px;">Partner prizes &mdash; top players</h3><div class="winner-grid" style="margin-bottom:18px;">'+cards+'</div>';
   }
   // Rank card: a screenshot-worthy summary of the player's current named
   // badge, built specifically so a proud "Mahadrishta" or "Hall of
   // Famer" has something worth sharing outside the app, not just a number
   // buried in a leaderboard row.
   function renderRankCard(){
-    const pts = balance();
+    const pts = lifetimeEarned();
     const tier = rankTierFor(pts);
     const next = RANK_TIERS.find(t => t.min > pts);
     return '<div class="rank-card" style="background:'+tier.color+';">'
@@ -1134,8 +889,20 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       + '<div class="kyc-row"><div class="ico">'+(state.phoneVerified?checkIcon():svgIcon('user'))+'</div><div class="txt"><b>Phone verified</b><span>Confirmed by OTP at sign&#8209;up</span></div></div>'
       + '<div class="kyc-row" style="align-items:center;"><div class="ico">'+(state.selfieVerified?checkIcon():svgIcon('user'))+'</div><div class="txt"><b>'+(state.selfieVerified?'Selfie verified':'Selfie not verified yet')+'</b><span>'+(state.selfieVerified?'Your blue Verified badge is active':'Confirm you’re a real person to earn your Verified badge')+'</span></div>'+(state.selfieVerified?'':'<button class="btn btn-sm" id="btnOpenSelfieSheet" style="flex:none; margin-left:8px;">Get Verified</button>')+'</div>'
       + '</div>'
-      + '<button class="btn btn-block" id="btnReset" style="margin-top:16px;">Reset demo</button>'
-      + '<p class="hint" style="text-align:center; margin-top:8px;">Clears all prototype activity and returns to onboarding.</p>';
+      + renderGrievanceCard()
+      + '<button class="btn btn-block" id="btnReset" style="margin-top:16px;">Reset preview data</button>'
+      + '<p class="hint" style="text-align:center; margin-top:8px;">Clears calls and points kept on this device.</p>';
+  }
+  function renderGrievanceCard(){
+    const g = state.grievance || {};
+    const rows = [g.name && '<b>'+esc(g.name)+'</b>',
+                  g.email && '<a href="mailto:'+esc(g.email)+'">'+esc(g.email)+'</a>',
+                  g.phone && '<span>'+esc(g.phone)+'</span>',
+                  g.address && '<span class="hint">'+esc(g.address)+'</span>'].filter(Boolean);
+    return '<div class="card grievance"><span class="k">Help &amp; grievances</span>'
+      + '<span>Raise a concern with our Grievance Officer'+(rows.length ? ':' : '.')+'</span>'
+      + (rows.length ? rows.join('') : '<span class="hint">Contact details are being finalised.</span>')
+      + '</div>';
   }
 
   /* ============ phone render / router ============ */
@@ -1161,7 +928,7 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
   function renderNotifPanel(){
     const rows = state.notifications.length
       ? state.notifications.map(n=>'<div class="notif-row '+(n.read?'read':'')+'"><span class="dot"></span><div class="txt"><span>'+esc(n.text)+'</span><span class="t">'+n.ts+'</span></div></div>').join('')
-      : '<p class="hint">No notifications yet — they&rsquo;ll show up here as markets move.</p>';
+      : '<p class="hint">No notifications yet &mdash; updates on questions you&rsquo;ve called will show up here.</p>';
     return '<div class="sheet-head"><h3 style="font-size:14px;">Notifications</h3><button class="btn btn-ghost btn-sm" id="btnCloseSheet" aria-label="Close">&#10005;</button></div><div class="sheet-body">'+rows+'</div>';
   }
 
@@ -1212,12 +979,6 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     }
     if(state.selfieSheetOpen){
       sheet.innerHTML = renderSelfieSheet();
-      backdrop.classList.add('open'); sheet.classList.add('open');
-      return;
-    }
-    if(state.openCampaign){
-      const camp = renderCampaignSheet(state.openCampaign);
-      sheet.innerHTML = '<div class="sheet-head"><h3 style="font-size:14px; max-width:80%;">Sponsored Campaign</h3><button class="btn btn-ghost btn-sm" id="btnCloseSheet" aria-label="Close">&#10005;</button></div><div class="sheet-body">'+camp.body+'</div>';
       backdrop.classList.add('open'); sheet.classList.add('open');
       return;
     }
@@ -1296,7 +1057,7 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
         state.selfieVerified = true;
         state.selfieSkipped = false;
         state._selfiePreviewDataUrl = null;
-        addLedger('kyc', 'Verified badge bonus (selfie confirmed)', 100);
+        addLedger('kyc', 'Verified badge reward (selfie confirmed)', 100);
         if(state.obStep==='selfie'){ state.obStep = 'interests'; }
         else { state.selfieSheetOpen = false; }
         render(); toast('You’re Verified — +100 pts'); break;
@@ -1323,7 +1084,7 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       }
       case 'continueInterests': {
         const openList = state.contests.filter(c=>c.status==='open');
-        const pick = openList.slice().sort((a,b)=>(b.pool.yes+b.pool.no)-(a.pool.yes+a.pool.no))[0];
+        const pick = openList.slice().sort((a,b)=>contestDef(b.id).participants-contestDef(a.id).participants)[0];
         state._hookContestId = pick ? pick.id : null;
         state._hookChoice = null;
         state.obStep = 'hook';
@@ -1331,11 +1092,7 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       }
       case 'hookPick': {
         if(state._hookChoice) return;
-        const c = state.contests.find(x=>x.id===state._hookContestId);
-        if(c){
-          c.pool[payload] += 30;
-          addLedger('signup','First foresight bonus', 30);
-        }
+        if(state._hookContestId){ addLedger('signup','First forecast reward', 30); }
         state._hookChoice = payload;
         render(); break;
       }
@@ -1343,8 +1100,8 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       case 'continueToWelcome': { state.obStep='welcome'; render(); break; }
       case 'enterApp': {
         state.user.signedIn = true;
-        addLedger('signup','Welcome bonus', 1000);
-        addLedger('kyc','Age & identity verified bonus', 150);
+        addLedger('signup','Welcome reward', 1000);
+        addLedger('kyc','Verification reward', 150);
         state.catFilter = (state.interests && state.interests[0]) || 'all';
         state.phoneScreen='home';
         render(); toast('Welcome to Bharat Foreseez'); break;
@@ -1457,41 +1214,20 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
         if(!sel){ toast('Choose an outcome first'); return; }
         if(!amt || amt < 10){ toast('Minimum commitment is 10 pts'); return; }
         if(amt > balance()){ toast('Not enough points'); return; }
-        if(callsLeftToday()<=0){ toast('Daily limit of '+dailyCallCap()+' calls reached'+(state.plusTier==='pro'?'':' — upgrade for more')); return; }
-        const id = state.openContest, def = contestDef(id), c = state.contests.find(x=>x.id===id);
+        if(callsLeftToday()<=0){ toast('Daily limit of '+dailyCallCap()+' calls reached'); return; }
+        const id = state.openContest, def = contestDef(id);
+        if(!def || def.status!=='open' || !(def.closes > liveNow())){ toast('This question is no longer open'); return; }
         addLedger('stake', 'Committed points to “'+def.title+'”', -amt, id);
-        c.pool[sel] += amt;
         state.predictions[id] = { option:sel, staked:amt };
         state.callsToday++;
         render(); toast('Call locked in'); break;
       }
-      case 'resolve': {
-        const id = state.openContest, def = contestDef(id), c = state.contests.find(x=>x.id===id);
-        c.status='resolved'; c.resolvedOption = payload;
-        const mine = state.predictions[id];
-        if(mine){
-          if(mine.option===payload){
-            const total = c.pool.yes + c.pool.no, winPool = c.pool[payload];
-            const payout = Math.round(mine.staked * (total/winPool));
-            addLedger('win', 'Correct: “'+def.title+'”', payout, id);
-            toast('Call correct — +'+fmtNum(payout)+' pts');
-          } else {
-            addLedger('lose', 'Resolved: “'+def.title+'” — no reward', 0, id);
-            toast('Resolved — no reward this time');
-          }
-        } else { toast('Topic resolved'); }
-        render(); break;
-      }
-      case 'checkin': { addLedger('checkin','Daily check‑in', 50); state.checkedIn=true; render(); toast('+50 pts'); break; }
-      case 'redeem': {
-        const p = PRIZES.find(x=>x.id===payload);
-        if(balance() < p.cost) return;
-        addLedger('redeem', 'Redeemed: '+p.name, -p.cost);
-        state.redeemed[p.id] = true;
-        render(); toast('Redeemed: '+p.name); break;
-      }
+      case 'checkin': { addLedger('checkin','Daily check‑in reward', 50); state.checkedIn=true; render(); toast('+50 pts'); break; }
       case 'reset': {
-        state = defaultState(); render(); toast('Demo reset'); break;
+        const keep = { questionDefs:state.questionDefs, contests:state.contests, feedStatus:state.feedStatus,
+                       newsFeed:state.newsFeed, newsAttribution:state.newsAttribution, flags:state.flags, grievance:state.grievance };
+        state = Object.assign(defaultState(), keep, SHOW_ONBOARDING ? {} : demoSignedIn());
+        render(); toast('Preview data cleared'); break;
       }
       case 'shareRank': {
         const tier = rankTierFor(balance());
@@ -1540,7 +1276,7 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       btnContinueInterests:()=>place('continueInterests'), btnSkipHook:()=>place('skipHook'),
       btnContinueToWelcome:()=>place('continueToWelcome'), btnEnterApp:()=>place('enterApp'),
       btnPlacePrediction:()=>place('placePrediction'), btnCheckin:()=>place('checkin'), btnReset:()=>place('reset'),
-      btnBell:()=>place('toggleBell'), btnTheme:()=>toggleTheme(), btnSubscribePlus:()=>place('subscribePlus'), btnSubscribePlusPro:()=>place('subscribePlusPro'), btnPostComment:()=>place('postComment'),
+      btnBell:()=>place('toggleBell'), btnTheme:()=>toggleTheme(), btnRetryFeed:()=>{ loadFeed(); loadTicker(); }, btnSubscribePlus:()=>place('subscribePlus'), btnSubscribePlusPro:()=>place('subscribePlusPro'), btnPostComment:()=>place('postComment'),
       btnOpenCreatePoll:()=>place('openCreatePoll'), btnPublishPoll:()=>place('publishPoll'),
       btnShareRank:()=>place('shareRank'),
       btnCaptureSelfie:()=>place('captureSelfie'), btnRetakeSelfie:()=>place('retakeSelfie'),
@@ -1556,14 +1292,12 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     const navBtn = t.closest('button[data-nav]'); if(navBtn){ place('nav', navBtn.dataset.nav); return; }
     const filterBtn = t.closest('button[data-filter]'); if(filterBtn){ place('filter', filterBtn.dataset.filter); return; }
     const sortBtn = t.closest('button[data-sort]'); if(sortBtn){ place('sort', sortBtn.dataset.sort); return; }
-    const cardOpen = t.closest('[data-open-contest]'); if(cardOpen){ place('openContest', cardOpen.dataset.openContest); return; }
-    const campOpen = t.closest('[data-open-campaign]'); if(campOpen){ place('openCampaign', campOpen.dataset.openCampaign); return; }
+    const cardOpen = t.closest('[data-open-contest]');
+    if(cardOpen){ if(cardOpen.tagName==='A') e.preventDefault(); place('openContest', cardOpen.dataset.openContest); return; }
     const interestBtn = t.closest('button[data-interest]'); if(interestBtn){ place('toggleInterest', interestBtn.dataset.interest); return; }
     const hookBtn = t.closest('button[data-hook]'); if(hookBtn){ place('hookPick', hookBtn.dataset.hook); return; }
     const optBtnEl = t.closest('button[data-opt]'); if(optBtnEl && !optBtnEl.disabled){ place('selectOpt', optBtnEl.dataset.opt); return; }
     const chipBtn = t.closest('button[data-chip]'); if(chipBtn){ place('chip', chipBtn.dataset.chip); return; }
-    const resolveBtn = t.closest('button[data-resolve]'); if(resolveBtn){ place('resolve', resolveBtn.dataset.resolve); return; }
-    const redeemBtn = t.closest('button[data-redeem]'); if(redeemBtn && !redeemBtn.disabled){ place('redeem', redeemBtn.dataset.redeem); return; }
     const pollHrsBtn = t.closest('button[data-poll-hrs]'); if(pollHrsBtn){ place('pollHrs', pollHrsBtn.dataset.pollHrs); return; }
     const likeBtn = t.closest('button[data-like-comment]'); if(likeBtn){ place('likeComment', likeBtn.dataset.likeComment); return; }
     const reportBtn = t.closest('button[data-report-comment]'); if(reportBtn && !reportBtn.disabled){ place('reportComment', reportBtn.dataset.reportComment); return; }
@@ -1571,6 +1305,9 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
   });
   document.getElementById('sheetBackdrop').addEventListener('click', ()=>place('closeSheet'));
   document.body.addEventListener('keydown', function(e){
+    if((e.key==='Enter' || e.key===' ') && e.target.matches && e.target.matches('[data-open-contest][role="button"]')){
+      e.preventDefault(); place('openContest', e.target.dataset.openContest); return;
+    }
     if(e.key==='Enter'){
       if(e.target.id==='phoneInput') place('sendOtp');
       if(e.target.id==='otpInput') place('verifyOtp');
@@ -1598,31 +1335,13 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
   });
 
 
-  /* ============ live-ticking markets ============ */
-  function tickLive(){
-    if(!state.user.signedIn) return;
-    const openContests = state.contests.filter(c=>c.status==='open');
-    if(!openContests.length) return;
-    const c = openContests[Math.floor(Math.random()*openContests.length)];
-    const def = contestDef(c.id);
-    const side = Math.random() < 0.5 ? 'yes' : 'no';
-    const amt = 20 + Math.floor(Math.random()*180);
-    c.pool[side] += amt;
-    const total = c.pool.yes + c.pool.no;
-    const pct = Math.round((c.pool[side]/total)*100);
-    const person = LB_SEED[Math.floor(Math.random()*LB_SEED.length)];
-    state.lbPoints[person.name] = (state.lbPoints[person.name]||0) + Math.floor(amt*0.15);
-    pushActivity('<b>'+esc(person.name)+'</b> foresaw &ldquo;'+esc(side==='yes'?def.yes:def.no)+'&rdquo; in '+esc(def.title));
-    if(Math.random() < 0.35){
-      pushNotification('New activity on &ldquo;'+def.title+'&rdquo; — now '+pct+'% '+(side==='yes'?def.yes:def.no)+'.');
-    }
-    if(Math.random() < 0.25){
-      const n = NEWS_SEED[Math.floor(Math.random()*NEWS_SEED.length)];
-      state.newsFeed = [{cat:n.cat, text:n.text, minsAgo:0}, ...(state.newsFeed||[])].slice(0,12);
-    }
-    render();
+  /* ============ live refresh ============ */
+  function refreshIfVisible(){
+    if(document.visibilityState==='visible' && state.user.signedIn && Date.now() - feedLoadedAt >= FEED_MIN_GAP_MS) loadFeed();
   }
-  setInterval(tickLive, 17000);
+  setInterval(refreshIfVisible, FEED_REFRESH_MS);
+  setInterval(function(){ if(document.visibilityState==='visible') loadTicker(); }, TICKER_REFRESH_MS);
+  document.addEventListener('visibilitychange', refreshIfVisible);
 
   /* ============ boot ============ */
   function withFocusPreserved(fn){
@@ -1663,22 +1382,18 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       fullName:'Demo Player',
       phoneVerified:true, ageDeclared:true, consentGiven:true, selfieVerified:true,
       ledger:[
-        { id:'lg-seed-1', type:'signup', label:'Welcome bonus', amount:1000, balanceAfter:1000, contestId:null, ts:timeNow() },
-        { id:'lg-seed-2', type:'kyc', label:'Age & identity verified bonus', amount:150, balanceAfter:1150, contestId:null, ts:timeNow() }
+        { id:'lg-seed-1', type:'signup', label:'Welcome reward', amount:1000, balanceAfter:1000, contestId:null, ts:timeNow() },
+        { id:'lg-seed-2', type:'kyc', label:'Verification reward', amount:150, balanceAfter:1150, contestId:null, ts:timeNow() }
       ]
     };
   }
-  function start(initialData){
-    state = Object.assign(defaultState(), initialData||{});
-    if(!SHOW_ONBOARDING && !(initialData && initialData.user)){ Object.assign(state, demoSignedIn()); }
+  function start(){
+    state = defaultState();
+    if(!SHOW_ONBOARDING) Object.assign(state, demoSignedIn());
     render();
+    loadAppConfig();
+    loadFeed();
+    loadTicker();
   }
-  if(window.claude && window.claude.hot && window.claude.hot.ready){
-    window.claude.hot.ready(start);
-  } else {
-    start(window.claude && window.claude.hot ? window.claude.hot.data : null);
-  }
-  if(window.claude && window.claude.hot && window.claude.hot.snapshot){
-    window.claude.hot.snapshot(function(){ return state; });
-  }
+  start();
 })();

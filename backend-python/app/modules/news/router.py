@@ -31,5 +31,7 @@ class Ticker(BaseModel):
 def get_ticker(response: Response):
     with SessionLocal() as s:
         out = service.ticker(s)
-    response.headers["Cache-Control"] = "public, max-age=60, s-maxage=120, stale-while-revalidate=300"
+    # Browsers revalidate; only the CDN caches (see forecasts.router for why).
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["CDN-Cache-Control"] = "public, s-maxage=120, stale-while-revalidate=300"
     return out
