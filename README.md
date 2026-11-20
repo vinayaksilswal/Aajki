@@ -34,14 +34,20 @@ reference ID, which matches the server log's correlation ID.
 
 ## App behaviour
 
-- **Onboarding:** built, but gated off for browser testing (`SHOW_ONBOARDING` in
-  `src/app/main.js`). Turn it on for the packaged APK.
+- **Account:** until phone sign-in ships (M2), the app gets a pseudonymous device account from
+  the API the first time it opens, with the welcome reward. The onboarding screens (sign-in, OTP,
+  18+ gate, consent) are built but gated off (`SHOW_ONBOARDING` in `src/app/main.js`) until the
+  server side exists. Don't open the app to the public before then.
 - **Theme:** the sun/moon button left of the notification bell switches light and dark. The
   choice persists on the device and is applied before first paint.
 - **Phase 2 features** (prizes, Plus, sponsored and user-created polls, Spin-the-Wheel) are off.
   Their flags come from the API's `/v1/app-config`.
-- **Calls:** until sign-in and the server-side ledger ship, calls and points are kept on the
-  device as a labelled preview. They don't count toward the public chance.
+- **Everything is live:** calls and points (double-entry ledger), settlement results, My calls,
+  ranks and leaderboards, badges, check-in and daily quiz, debate with report and block, the
+  sentiment dashboard, grievances, self-exclusion, data export and account deletion.
+- **Languages:** English and Hindi (Profile → Language). Strings live in `src/app/i18n.js`.
+- **Update prompts:** `VITE_APP_BUILD` is compared with the server's minimum and latest build.
+- **Operations:** see `docs/operations.md`.
 
 ## Deploy
 

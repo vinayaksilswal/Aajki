@@ -60,5 +60,7 @@ def install(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unexpected(_: Request, exc: Exception):
         log.exception("unhandled error")
+        from app.modules.governance.ops import record_error  # lazy: avoids an import cycle
+        record_error("5xx")
         return JSONResponse(body("INTERNAL", "Something went wrong. Please try again."),
                             status_code=500)

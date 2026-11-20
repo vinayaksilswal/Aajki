@@ -1,6 +1,6 @@
 """Admin-only sentiment signal (question-wording tone + crowd lean), cached per instance.
 
-The public, anonymised sentiment dashboard with a minimum group size of 50 is M5.
+The public, anonymised dashboard with a minimum group of 50 is sentiment.public.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def _inputs(s: Session) -> list[dict]:
     out = []
     for q in qs:
         c = calls.get(q.id, {})
-        options = [{"id": o["key"], "label": o["label"], "votes": c.get(o["key"], 0)}
+        options = [{"id": o["key"], "label": o["label"], "votes": c.get(o["key"], {}).get("calls", 0)}
                    for o in q.outcomes or []]
         out.append({"id": q.id, "question": q.title, "category": q.category, "options": options,
                     "total_votes": sum(o["votes"] for o in options),

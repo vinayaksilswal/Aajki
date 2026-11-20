@@ -1,7 +1,7 @@
 """Typed runtime settings, read once from the environment (and backend-python/.env).
 
 Production and staging refuse to start without the settings they cannot safely default
-(database, admin password, CORS origins); development falls back to local defaults.
+(database, CORS origins); development falls back to local defaults.
 """
 from __future__ import annotations
 
@@ -28,9 +28,19 @@ class Settings(BaseSettings):
     # Comma-separated list of browser origins allowed to call the API.
     allowed_origins: str = ""
 
-    # Admin panel. Basic Auth is interim until the role-based admin accounts land (M6).
+    # Bootstrap only: while no admin account exists, signing in with ADMIN_USER and
+    # ADMIN_PASSWORD creates the first Super Admin (who must then enrol two-factor sign-in).
+    # Once any admin account exists these values no longer sign anyone in.
     admin_user: str = "admin"
     admin_password: str = ""
+    admin_session_hours: int = 12
+
+    # Behind a proxy you control that overwrites X-Forwarded-For / X-Real-IP. Always on when
+    # running on Vercel (which overwrites them).
+    trust_proxy_headers: bool = False
+
+    # Error reporting (optional). Personal data is never attached to events.
+    sentry_dsn: str = ""
 
     # Shared secret the scheduler sends as `Authorization: Bearer <secret>`.
     cron_secret: str = ""
@@ -43,6 +53,21 @@ class Settings(BaseSettings):
 
     min_supported_build: int = 1
     latest_build: int = 1
+
+    # Points economy (spec s.2, s.3). All amounts are points.
+    signup_reward: int = 1000
+    checkin_reward: int = 50
+    quiz_reward: int = 25
+    # Cap on everyday rewards (check-in, quiz) one user can receive in an Indian day.
+    daily_reward_cap: int = 200
+    daily_call_cap: int = 10
+    call_min_points: int = 10
+    call_max_points: int = 500
+    # How long a settled result stays open to disputes.
+    dispute_window_hours: int = 48
+
+    # Safeguards: the app reminds users after this many minutes in one session.
+    session_reminder_minutes: int = 30
 
     # Statutory Grievance Officer, shown in the app (IT Rules 2021 / DPDP Act 2023).
     grievance_officer_name: str = ""
@@ -68,7 +93,6 @@ class Settings(BaseSettings):
         if self.is_dev:
             return
         missing = [name for name, val in (("DATABASE_URL", self.database_url),
-                                          ("ADMIN_PASSWORD", self.admin_password),
                                           ("ALLOWED_ORIGINS", self.allowed_origins)) if not val]
         if missing:
             raise RuntimeError(f"{self.app_env} requires: {', '.join(missing)}")

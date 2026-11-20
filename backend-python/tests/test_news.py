@@ -57,7 +57,8 @@ def test_ticker_links_a_headline_only_while_its_question_is_open(client):
     assert links == {a: open_q, b: None}
 
 
-def test_drafting_from_a_headline_creates_one_private_draft(client):
+def test_drafting_from_a_headline_creates_one_private_draft(admin_client):
+    client = admin_client
     nid = make_news(title="Election Commission announces bypoll dates for three states")
     r = client.post(f"/admin/news/{nid}/draft", headers={"Origin": ORIGIN}, follow_redirects=False)
     assert r.status_code == 303

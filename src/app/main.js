@@ -1,5 +1,6 @@
 // Bharat Foreseez consumer app.
-import { api, allOpenQuestions } from './api.js';
+import { api, allOpenQuestions, ensureSession, newId } from './api.js';
+import { t, getLang, setLang } from './i18n.js';
 
 const BRAND = import.meta.env.BASE_URL + 'brand/';
 
@@ -42,16 +43,24 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     {key:'community', label:'Community', color:'var(--cat-community)', emoji:'💬'}
   ];
   const CAT_MAP = Object.fromEntries(CATS.map(c=>[c.key,c]));
+  const AVATARS = { lotus:'🪷', tiger:'🐯', peacock:'🦚', elephant:'🐘', mango:'🥭', kite:'🪁', diya:'🪔', cricket:'🏏' };
+  function avatarOf(key){ return AVATARS[key] || '🙂'; }
 
   /* ============ live data (Bharat Foreseez API) ============
-     Questions and headlines come from the backend. There is no offline or sample content:
-     while loading, or if the server can't be reached, the app says so. */
+     Everything shown comes from the backend: questions, headlines, points, calls, ranks,
+     comments and rewards. There is no offline or sample content: while loading, or if the
+     server can't be reached, the app says so. */
   const FEED_REFRESH_MS = 60000;
   const TICKER_REFRESH_MS = 300000;
-  // Spec s.6: no sentiment breakdown is shown for a group smaller than this.
-  const MIN_GROUP = 50;
-  // Phase 1 ships status-only rewards; the server's /v1/app-config is the source of truth.
-  const PHASE1_FLAGS = { prizes:false, plus:false, sponsored_polls:false, user_created_polls:false, spin_the_wheel:false };
+  // Open questions poll for chance updates while a question is open on screen (spec s.4:
+  // live updates under 2 s with polling fallback; SSE arrives with container hosting).
+  const SHEET_REFRESH_MS = 15000;
+  // Bumped with each app release; the server's min/latest build drive update prompts.
+  const APP_BUILD = Number(import.meta.env.VITE_APP_BUILD || 1);
+  const DEFAULT_RULES = { daily_call_cap:10, call_min_points:10, call_max_points:500, checkin_reward:50,
+    quiz_reward:25, session_reminder_minutes:30, comment_max_length:140, min_group:50, self_exclusion_days:[1,7,30,90] };
+  const PHASE1_FLAGS = { prizes:false, plus:false, sponsored_polls:false, user_created_polls:false, spin_the_wheel:false,
+    forecasting:true, debate:true, checkin:true, quiz:true, leaderboards:true, sentiment_dashboard:true, invites:true };
 
   function toDef(q){
     const out = {}; (q.outcomes||[]).forEach(o=>{ out[o.key] = o; });
@@ -61,14 +70,14 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       closes: q.closes_at ? new Date(q.closes_at) : null,
       participants:q.participants||0, chanceHidden:!!q.chance_hidden,
       chance:{ yes: out.yes ? out.yes.chance : null, no: out.no ? out.no.chance : null },
-      resolution:q.resolution||{}, context:q.context||null, status:q.status
+      resolution:q.resolution||{}, context:q.context||null, status:q.status, result:q.result||null
     };
   }
   function applyQuestions(list){
     const defs = {};
     list.forEach(q=>{ if(CAT_MAP[q.category]) defs[q.id] = toDef(q); });
     state.questionDefs = defs;
-    state.contests = Object.values(defs).map(d=>({ id:d.id, status: d.status==='settled' ? 'resolved' : 'open', resolvedOption:null }));
+    state.contests = Object.values(defs).map(d=>({ id:d.id, status:'open' }));
   }
   let feedInFlight = null, feedLoadedAt = 0;
   const FEED_MIN_GAP_MS = 15000;
@@ -98,42 +107,109 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
   }
   async function loadAppConfig(){
     try {
-      const cfg = await api.appConfig();
+      const cfg = await api.appConfig(state.me && state.me.region);
+      state.cfg = cfg;
       state.flags = Object.assign({}, PHASE1_FLAGS, cfg.flags || {});
       state.grievance = cfg.grievance_officer || null;
       render();
     } catch(e){ /* stay on the Phase 1 defaults */ }
   }
+  function rules(){ return (state.cfg && state.cfg.rules) || DEFAULT_RULES; }
 
-  // Winner Prizes: grand, non‑cash prizes awarded — never purchased or point‑redeemed —
-  // to the top‑ranked players each period. Distinct from the everyday points
-  // catalogue above; skews toward flagship devices and educational‑platform
-  // subscriptions since students and university players are a core audience.
-  const WINNER_PRIZES = [
-    {id:'iphone', name:'iPhone 16', desc:'Latest‑generation flagship smartphone.', tag:'Electronics', tier:'Grand Prize — Rank 1, monthly', icon:'📱'},
-    {id:'ipad', name:'iPad (10th Gen), 128GB', desc:'Wi‑Fi model — for notes, research and reading.', tag:'Electronics', tier:'Grand Prize — Top 3, monthly', icon:'📱'},
-    {id:'coursera-plus', name:'Coursera Plus — 1 Year', desc:'Unlimited access to 7,000+ courses and certificates.', tag:'Education', tier:'Top 10, monthly', icon:'🎓'},
-    {id:'udemy-personal', name:'Udemy Personal Plan — 1 Year', desc:'Unlimited access to Udemy’s course library.', tag:'Education', tier:'Top 10, monthly', icon:'🎓'},
-    {id:'linkedin-learning', name:'LinkedIn Learning — 1 Year', desc:'Professional and technical skills courses.', tag:'Education', tier:'Top 25, monthly', icon:'🎓'},
-    {id:'duolingo-super', name:'Duolingo Super — 1 Year', desc:'Ad‑free, unlimited language learning.', tag:'Education', tier:'Top 25, monthly', icon:'🎓'}
-  ];
+  // The signed-in account: points, rank, stats, badges, safeguards and regional switches.
+  async function loadMe(){
+    try {
+      const prevRegion = state.me && state.me.region;
+      state.me = await api.me();
+      state.meError = null;
+      if(state.me.flags) state.flags = Object.assign({}, PHASE1_FLAGS, state.me.flags);
+      if(state.me.region !== prevRegion && state.cfg) loadAppConfig();
+    } catch(e){ state.meError = e; }
+    render();
+  }
+  async function loadMyCalls(){
+    try {
+      const calls = await api.myCalls();
+      state.myCalls = calls;
+      const map = {};
+      calls.forEach(c=>{ map[c.question_id] = { option:c.outcome_key, staked:c.points, status:c.status, released:c.released }; });
+      state.predictions = map;
+      noticeSettledCalls(calls);
+    } catch(e){ /* keep the last list */ }
+    render();
+  }
+  async function loadLedger(more){
+    if(state._ledgerLoading) return;
+    state._ledgerLoading = true;
+    try {
+      const page = await api.ledger(more ? state.ledgerCursor : null);
+      state.ledgerItems = more ? state.ledgerItems.concat(page.items) : page.items;
+      state.ledgerCursor = page.next_cursor;
+      state.ledgerError = null;
+    } catch(e){ state.ledgerError = e; }
+    state._ledgerLoading = false;
+    render();
+  }
+  async function loadLeaderboard(period){
+    try { state.lb[period] = await api.leaderboard(period); state.lbError = null; }
+    catch(e){ state.lbError = e; }
+    render();
+  }
+  async function loadQuiz(){
+    try { state.quiz = (await api.quizToday()).quiz; } catch(e){ /* optional */ }
+    render();
+  }
+  async function loadSentiment(){
+    try { state.sentiment = await api.sentiment(); state.sentimentError = null; }
+    catch(e){ state.sentimentError = e; }
+    render();
+  }
+  async function loadGrievances(){
+    try { state.grievances = await api.grievances(); } catch(e){ /* keep */ }
+    render();
+  }
+  async function loadBlocks(){
+    try { state.blocks = await api.blocks(); } catch(e){ /* keep */ }
+    render();
+  }
+  async function loadThread(qid){
+    const th = state.threads[qid] || (state.threads[qid] = { items:[], total:0, status:'loading' });
+    try {
+      const page = await api.comments(qid);
+      Object.assign(th, page, { status:'ready' });
+    } catch(e){ th.status = 'error'; th.error = e; }
+    render();
+  }
+  // A question opened from "My calls" may have closed and left the open feed.
+  async function ensureQuestion(qid){
+    if(contestDef(qid)) return;
+    try { state.extraDefs[qid] = toDef(await api.question(qid)); }
+    catch(e){ state.extraDefs[qid] = null; }
+    render();
+  }
+  async function refreshOpenQuestion(){
+    const id = state.openContest;
+    if(!id || document.visibilityState!=='visible') return;
+    try {
+      const d = toDef(await api.question(id));
+      if(state.questionDefs[id]) state.questionDefs[id] = d; else state.extraDefs[id] = d;
+      render();
+    } catch(e){ /* keep the last figure */ }
+  }
 
-  // Rank badges: named tiers derived from lifetime Foreseez Points balance.
-  // Purely an identity/status layer on top of the same earn‑only balance that
-  // already drives the ledger, wallet and leaderboard — gives every
-  // player, not just the top of the leaderboard, a named badge to climb
-  // toward as their points grow.
+  // Rank tiers come from the server (admins can tune thresholds); these match the spec defaults.
   const RANK_TIERS = [
-    {min:0,     name:'Navodit',        emoji:'🌱', color:'#8a8f98'},
-    {min:1000,  name:'Drishta',   emoji:'✅', color:'#1d9bf0'},
-    {min:2500,  name:'Vishleshak',     emoji:'📊', color:'#1baf7a'},
-    {min:4500,  name:'Top Voice',             emoji:'🌟', color:'#c98500'},
-    {min:7000,  name:'Hall of Famer',         emoji:'🏆', color:'#b8860b'},
-    {min:10000, name:"Mahadrishta", emoji:'👑', color:'linear-gradient(135deg,#FF9933,#b8860b)'}
+    {min:0,     name:'Navodit',       emoji:'🌱', color:'#8a8f98'},
+    {min:1000,  name:'Drishta',       emoji:'✅', color:'#1d9bf0'},
+    {min:2500,  name:'Vishleshak',    emoji:'📊', color:'#1baf7a'},
+    {min:4500,  name:'Top Voice',     emoji:'🌟', color:'#c98500'},
+    {min:7000,  name:'Hall of Famer', emoji:'🏆', color:'#b8860b'},
+    {min:10000, name:'Mahadrishta',   emoji:'👑', color:'linear-gradient(135deg,#FF9933,#b8860b)'}
   ];
+  function tiers(){ return (state.cfg && state.cfg.rank_tiers && state.cfg.rank_tiers.length) ? state.cfg.rank_tiers : RANK_TIERS; }
   function rankTierFor(pts){
-    let tier = RANK_TIERS[0];
-    for(const t of RANK_TIERS){ if(pts >= t.min) tier = t; }
+    let tier = tiers()[0];
+    for(const t of tiers()){ if(pts >= t.min) tier = t; }
     return tier;
   }
   function rankBadgeChip(pts, sm){
@@ -153,211 +229,95 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       selfieVerified:false, selfieSkipped:false, selfieSheetOpen:false,
       _selfiePreviewDataUrl:null, _selfieCameraError:false,
       user:{ signedIn:false, name:'', method:'' },
-      ledger:[],
-      contests: [], questionDefs: {}, feedStatus:'idle', feedError:null,
-      predictions:{},
-      checkedIn:false,
+      contests: [], questionDefs: {}, extraDefs:{}, feedStatus:'idle', feedError:null,
+      me:null, meError:null, cfg:null,
+      predictions:{}, myCalls:[],
+      ledgerItems:[], ledgerCursor:null, ledgerError:null, ledgerTab:'calls',
+      lb:{}, lbPeriod:'weekly', lbError:null,
+      quiz:undefined, sentiment:null, sentimentError:null,
+      grievances:[], blocks:[], threads:{}, replyTo:null,
       catFilter:'all',
-      feed:[],
-      comments:{},
       notifications:[],
       activity:[],
       searchQuery:'',
       sortMode:'closing',
       notifPanelOpen:false,
-      plus:false,
-      plusTier:null,
-      callsDay:null, callsToday:0,
-      customPolls:[],
-      creatingPoll:false,
-      openCampaign:null,
-      _pollDraft:null,
-      showRaw:false,
       newsFeed: [], newsAttribution:'',
       flags: Object.assign({}, PHASE1_FLAGS), grievance:null,
-      _commentMedia:null, _commentConsent:false, _voiceRecording:false, _voiceElapsed:0
+      _busy:{}, _callKey:null, _editingName:false, _grievanceOpen:false
     };
   }
   let state = defaultState();
 
-  function contestDef(id){ return (state.questionDefs||{})[id] || (state.customPolls||[]).find(c=>c.id===id); }
-  // Daily call limits by plan: free 10, Plus 25, Plus Pro unlimited.
-  const DAILY_CALL_LIMITS = { free:10, plus:25, pro:Infinity };
-  function dailyCallCap(){ return state.plusTier==='pro' ? DAILY_CALL_LIMITS.pro : (state.plus ? DAILY_CALL_LIMITS.plus : DAILY_CALL_LIMITS.free); }
-  function rollCallDay(){ const k = liveNow().toDateString(); if(state.callsDay!==k){ state.callsDay=k; state.callsToday=0; } }
-  function callsLeftToday(){ rollCallDay(); return Math.max(0, dailyCallCap() - state.callsToday); }
-  function balance(){ return state.ledger.length ? state.ledger[state.ledger.length-1].balanceAfter : 0; }
+  function contestDef(id){ return (state.questionDefs||{})[id] || (state.extraDefs||{})[id] || null; }
+  function callsToday(){ return state.me ? state.me.calls_today : 0; }
+  function dailyCallCap(){ return rules().daily_call_cap; }
+  function callsLeftToday(){ return Math.max(0, dailyCallCap() - callsToday()); }
+  function balance(){ return state.me ? state.me.points.available : 0; }
+  function committedPoints(){ return state.me ? state.me.points.committed : 0; }
   // Spec s.6: rank follows lifetime points earned, so committing points never lowers it.
-  function lifetimeEarned(){ return state.ledger.reduce((s,e)=>s + (e.amount > 0 ? e.amount : 0), 0); }
-  function addLedger(type,label,amount,contestId){
-    const bal = balance() + amount;
-    state.ledger.push({ id:'lg'+state.ledger.length+'-'+Date.now(), type, label, amount, balanceAfter:bal, contestId:contestId||null, ts:timeNow() });
-    return bal;
+  function lifetimeEarned(){ return state.me ? state.me.rank.lifetime_earned : 0; }
+  function restriction(){ return state.me && state.me.restriction; }
+  function busy(key, on){ if(on===undefined) return !!state._busy[key]; state._busy[key] = on; }
+  function errText(e){ return (e && e.message) || 'Something went wrong. Please try again.'; }
+
+  /* ============ debate ============
+     Text comments (140 characters) with one level of replies. Photos, videos and voice notes
+     open once automated screening is live: the spec requires every attachment to be checked
+     before anyone sees it, and that can't be done safely in the app. */
+  function timeAgo(isoStr){
+    const s = Math.max(0, (Date.now() - new Date(isoStr).getTime())/1000);
+    if(s < 60) return 'just now';
+    if(s < 3600) return Math.floor(s/60)+'m';
+    if(s < 86400) return Math.floor(s/3600)+'h';
+    return Math.floor(s/86400)+'d';
   }
-
-  /* ============ comments / activity / notifications ============ */
-  function ensureComments(contestId){ return state.comments[contestId] || (state.comments[contestId] = []); }
-
-  /* ============ debate attachments: photo / video / voice note ============
-     PROTOTYPE NOTE: this demo enforces "no explicit or graphic content" via
-     a required self-certification checkbox plus community reporting (below).
-     A production build MUST also run every photo/video/voice upload through
-     a server-side automated moderation pipeline (e.g. image/video SafeSearch
-     classifiers, transcription + text moderation for voice notes) before it
-     becomes visible to anyone else, backed by a human review queue for
-     reports — that step cannot be done safely in client-side JS alone, so
-     nothing here should be mistaken for real moderation. */
-  const MAX_PHOTO_BYTES = 8*1024*1024;
-  const MAX_VIDEO_BYTES = 40*1024*1024;
-  const MAX_VIDEO_SECONDS = 20;
-  const MAX_VOICE_SECONDS = 60;
-  let voiceStream = null, voiceRecorder = null, voiceChunks = [], voiceRecTimer = null;
-
-  function formatDur(sec){
-    sec = Math.max(0, Math.round(sec||0));
-    const m = Math.floor(sec/60), s = sec%60;
-    return m+':'+(s<10?'0':'')+s;
-  }
-  function renderCommentMedia(cm){
-    if(!cm.media) return '';
-    if(cm.media.reported) return '<div class="comment-media reported">Media hidden &mdash; reported for moderator review</div>';
-    const m = cm.media;
-    if(m.type==='photo') return '<div class="comment-media"><img src="'+m.dataUrl+'" alt="Attached photo"></div>';
-    if(m.type==='video') return '<div class="comment-media"><video src="'+m.dataUrl+'" controls playsinline muted></video></div>';
-    if(m.type==='voice') return '<div class="comment-media voice"><audio src="'+m.dataUrl+'" controls></audio><span class="dur">Voice note &middot; '+formatDur(m.duration)+'</span></div>';
-    return '';
-  }
-  function renderCommentForm(){
-    const media = state._commentMedia;
-    const recording = state._voiceRecording;
-    // Note: typing in #commentInput deliberately doesn't trigger a re-render
-    // (it would steal focus/cursor position), so the Post button here is
-    // only gated on the media-consent requirement, not on text presence —
-    // an empty, media-less submit is already a silent no-op in postComment.
-    const postBlocked = !!(media && !state._commentConsent);
-    let html = '<div class="comment-form"><input id="commentInput" type="text" maxlength="140" placeholder="Add to the debate…" value="'+esc(state._commentDraft||'')+'">'
-      + '<button class="btn btn-sm" id="btnPostComment" '+(postBlocked?'disabled':'')+'>Post</button></div>';
-
-    html += '<p class="media-policy">Back up your view with a photo, a short video (&le;'+MAX_VIDEO_SECONDS+'s) or a voice note (&le;'+MAX_VOICE_SECONDS+'s). Keep it real &mdash; <strong>no explicit or graphic content</strong>. Reported media is hidden pending review.</p>';
-
-    html += '<div class="attach-row">'
-      + '<button class="attach-btn" id="btnAttachPhoto" type="button" '+((media||recording)?'disabled':'')+'>'+svgIcon('camera')+' Photo</button>'
-      + '<button class="attach-btn" id="btnAttachVideo" type="button" '+((media||recording)?'disabled':'')+'>'+svgIcon('video')+' Video</button>'
-      + '<button class="attach-btn '+(recording?'rec':'')+'" id="btnRecordVoice" type="button" '+((media&&!recording)?'disabled':'')+'>'
-        + (recording ? '<span class="rec-dot"></span> Stop &middot; '+formatDur(state._voiceElapsed||0) : svgIcon('mic')+' Voice')
-        + '</button>'
-      + '<input type="file" id="commentPhotoInput" accept="image/*" hidden>'
-      + '<input type="file" id="commentVideoInput" accept="video/*" hidden>'
+  function commentRow(c, isReply){
+    const actions = c.mine
+      ? '<button class="link-btn" data-del-comment="'+c.id+'">'+t('delete')+'</button>'
+      : (isReply ? '' : '<button class="link-btn" data-reply="'+c.id+'">'+t('reply')+'</button>')
+        + '<button class="link-btn" data-report-comment="'+c.id+'">'+t('report')+'</button>'
+        + '<button class="link-btn" data-block-author="'+c.id+'">'+t('block')+'</button>';
+    return '<div class="comment'+(isReply?' reply':'')+'"><div class="who"><span class="av">'+avatarOf(c.author.avatar)+'</span><b>'+esc(c.author.display_name)+'</b><span class="t">'+timeAgo(c.created_at)+'</span></div>'
+      + '<p>'+esc(c.body)+'</p><div class="c-actions">'+actions+'</div>'
+      + (state._reportFor===c.id ? '<div class="report-menu">Why report this? '+((state.cfg && state.cfg.report_reasons)||[]).map(r=>'<button class="btn btn-sm" data-report-reason="'+esc(r.key)+'">'+esc(r.label)+'</button>').join('')+'</div>' : '')
       + '</div>';
+  }
+  function renderThread(qid){
+    if(!state.flags.debate) return '<div class="discuss"><h4>'+t('debate')+'</h4><p class="hint">Debate isn&rsquo;t available in your region right now.</p></div>';
+    const th = state.threads[qid];
+    let list;
+    if(!th || th.status==='loading') list = '<p class="hint">'+t('loading')+'</p>';
+    else if(th.status==='error') list = '<p class="hint">Couldn&rsquo;t load comments. <button class="link-btn" data-reload-thread="'+esc(qid)+'">'+t('retry')+'</button></p>';
+    else if(!th.items.length) list = '<p class="hint">No comments yet. Start the debate.</p>';
+    else list = th.items.map(c=>commentRow(c,false) + (c.replies||[]).map(r=>commentRow(r,true)).join('')).join('');
+    const replying = state.replyTo ? '<div class="replying">Replying &middot; <button class="link-btn" id="btnCancelReply">cancel</button></div>' : '';
+    const blocked = !!restriction();
+    const form = blocked ? '<p class="hint">'+esc(restriction().message)+'</p>'
+      : replying + '<div class="comment-form"><input id="commentInput" type="text" maxlength="'+rules().comment_max_length+'" placeholder="Add to the debate…" value="'+esc(state._commentDraft||'')+'">'
+        + '<button class="btn btn-sm" id="btnPostComment" '+(busy('comment')?'disabled':'')+'>'+t('post')+'</button></div>'
+        + '<p class="media-policy">Up to '+rules().comment_max_length+' characters, no links. Photos, videos and voice notes open once automated screening is live. Reported comments are reviewed by moderators.</p>';
+    return '<div class="discuss"><h4>'+t('debate')+(th && th.total ? ' &middot; '+th.total : '')+'</h4>'+form+'<div class="comments">'+list+'</div></div>';
+  }
 
-    if(media){
-      const label = media.type==='photo' ? 'Photo attached'
-        : media.type==='video' ? 'Video attached &middot; '+formatDur(media.duration)
-        : 'Voice note &middot; '+formatDur(media.duration);
-      const thumb = media.type==='photo' ? '<img class="thumb" src="'+media.dataUrl+'">' : '<div class="thumb"></div>';
-      html += '<div class="media-pending">'+thumb+'<div class="meta"><b>'+label+'</b>Ready to post</div><button class="rm" id="btnRemoveCommentMedia" type="button">&times;</button></div>';
-      html += '<label class="media-consent"><input type="checkbox" id="chkMediaConsent" '+(state._commentConsent?'checked':'')+'> This doesn&rsquo;t contain explicit or graphic content, and I have the right to share it.</label>';
-    }
-    return html;
-  }
-  function attachCommentMedia(media){
-    state._commentMedia = media;
-    state._commentConsent = false;
-    render();
-  }
-  function resetVoiceRecordingState(){
-    state._voiceRecording = false;
-    state._voiceElapsed = 0;
-    if(voiceRecTimer){ clearInterval(voiceRecTimer); voiceRecTimer = null; }
-  }
-  function startVoiceRecording(){
-    if(state._commentMedia || state._voiceRecording) return;
-    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-      toast('Microphone isn’t available in this browser'); return;
-    }
-    navigator.mediaDevices.getUserMedia({ audio:true }).then(function(stream){
-      voiceStream = stream;
-      voiceChunks = [];
-      try{ voiceRecorder = new MediaRecorder(stream); }
-      catch(err){
-        stream.getTracks().forEach(function(t){ t.stop(); });
-        toast('Voice recording isn’t supported in this browser'); return;
+  /* ============ notifications ============
+     Built from your own calls: when a result is released or a question is voided. */
+  const CALL_STATUS_KEY = 'bf-call-status';
+  function noticeSettledCalls(calls){
+    let seen = {};
+    try { seen = JSON.parse(localStorage.getItem(CALL_STATUS_KEY) || '{}'); } catch(_) {}
+    const first = Object.keys(seen).length === 0;
+    calls.forEach(c=>{
+      const before = seen[c.id];
+      if(!first && before === 'active' && c.status !== 'active'){
+        const title = c.question_title || 'a question';
+        if(c.status==='correct') pushNotification('Correct call on “'+title+'”: '+fmtNum(c.released)+' points released.');
+        else if(c.status==='incorrect') pushNotification('“'+title+'” has settled. Your call didn’t match the result.');
+        else if(c.status==='refunded') pushNotification('“'+title+'” was voided. Your '+fmtNum(c.points)+' points were returned.');
       }
-      voiceRecorder.ondataavailable = function(e){ if(e.data && e.data.size>0) voiceChunks.push(e.data); };
-      voiceRecorder.onstop = function(){
-        voiceStream.getTracks().forEach(function(t){ t.stop(); });
-        voiceStream = null;
-        const blob = new Blob(voiceChunks, { type: voiceRecorder.mimeType||'audio/webm' });
-        const durationSec = state._voiceElapsed;
-        const reader = new FileReader();
-        reader.onload = function(){
-          resetVoiceRecordingState();
-          attachCommentMedia({ type:'voice', dataUrl: reader.result, duration: durationSec });
-        };
-        reader.readAsDataURL(blob);
-      };
-      voiceRecorder.start();
-      state._voiceRecording = true;
-      state._voiceElapsed = 0;
-      render();
-      voiceRecTimer = setInterval(function(){
-        state._voiceElapsed++;
-        if(state._voiceElapsed >= MAX_VOICE_SECONDS){ stopVoiceRecording(); }
-        else { render(); }
-      }, 1000);
-    }).catch(function(){
-      toast('Microphone access was blocked — allow it to record a voice note');
+      seen[c.id] = c.status;
     });
-  }
-  function stopVoiceRecording(){
-    if(voiceRecorder && state._voiceRecording){ voiceRecorder.stop(); }
-    else { resetVoiceRecordingState(); render(); }
-  }
-  function handleCommentFile(kind, file){
-    if(!file) return;
-    if(kind==='photo'){
-      if(!file.type.startsWith('image/')){ toast('Please choose an image file'); return; }
-      if(file.size > MAX_PHOTO_BYTES){ toast('Photos must be under 8MB'); return; }
-      const reader = new FileReader();
-      reader.onload = function(){ attachCommentMedia({ type:'photo', dataUrl: reader.result }); };
-      reader.readAsDataURL(file);
-    } else if(kind==='video'){
-      if(!file.type.startsWith('video/')){ toast('Please choose a video file'); return; }
-      if(file.size > MAX_VIDEO_BYTES){ toast('Videos must be under 40MB'); return; }
-      const url = URL.createObjectURL(file);
-      const probe = document.createElement('video');
-      probe.preload = 'metadata';
-      let settled = false;
-      // Safety net: on an unusual device/codec combo where the browser never
-      // fires loadedmetadata *or* error (rather than firing error promptly,
-      // as most unsupported-format cases do), don't leave the user with a
-      // picker that silently did nothing.
-      const giveUpTimer = setTimeout(function(){
-        if(settled) return;
-        settled = true;
-        URL.revokeObjectURL(url);
-        toast('That video took too long to read — try a shorter clip or a different format');
-      }, 8000);
-      probe.onloadedmetadata = function(){
-        if(settled) return;
-        settled = true;
-        clearTimeout(giveUpTimer);
-        const dur = probe.duration;
-        URL.revokeObjectURL(url);
-        if(dur > MAX_VIDEO_SECONDS){ toast('Videos must be '+MAX_VIDEO_SECONDS+' seconds or shorter'); return; }
-        const reader = new FileReader();
-        reader.onload = function(){ attachCommentMedia({ type:'video', dataUrl: reader.result, duration: dur }); };
-        reader.readAsDataURL(file);
-      };
-      probe.onerror = function(){
-        if(settled) return;
-        settled = true;
-        clearTimeout(giveUpTimer);
-        URL.revokeObjectURL(url);
-        toast('Couldn’t read that video — try a different clip or format');
-      };
-      probe.src = url;
-    }
+    try { localStorage.setItem(CALL_STATUS_KEY, JSON.stringify(seen)); } catch(_) {}
   }
 
   function pushActivity(text){
@@ -496,12 +456,10 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
           +'<button class="btn btn-ghost btn-block" id="btnSkipHook" style="margin-top:4px;">Maybe later</button>'
           +'<div class="step-dots">'+dotsHtml+'</div></div>';
       }
-      const total = c.pool.yes + c.pool.no;
-      const yesPct = Math.round((c.pool.yes/total)*100), noPct = 100-yesPct;
-      const withPct = state._hookChoice==='yes' ? yesPct : noPct;
+      const yesPct = chancePct(def, 'yes');
+      const withPct = yesPct===null ? null : (state._hookChoice==='yes' ? yesPct : 100-yesPct);
       return '<div class="ob">'
-        +'<div class="ob-logo"><div class="ring" style="font-size:34px;">✨</div><h1>Nice pick!</h1><p>You’re with <strong>'+withPct+'%</strong> of players on &ldquo;'+esc(def.title)+'&rdquo;.</p></div>'
-        +'<div class="callout"><strong>+30 pts</strong> &mdash; first forecast reward, already credited to your wallet.</div>'
+        +'<div class="ob-logo"><div class="ring" style="font-size:34px;">✨</div><h1>Nice pick!</h1><p>'+(withPct===null ? 'You’re among the first to weigh in' : 'You’re with <strong>'+withPct+'%</strong> of players')+' on &ldquo;'+esc(def.title)+'&rdquo;.</p></div>'
         +'<button class="btn btn-primary btn-block" id="btnContinueToWelcome" style="margin-top:8px;">Continue</button>'
         +'<div class="step-dots">'+dotsHtml+'</div></div>';
     }
@@ -629,15 +587,12 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
   }
   function feedReady(){ return state.feedStatus==='ready' || state.feedStatus==='refreshing'; }
 
-  // Shown right on Home so a prize catalogue is the first thing a player sees
-  // after signing in — the "what could I win" hook, before any topic list.
-  function renderHomePrizeStrip(){
-    if(!state.flags.prizes) return '';
-    const cards = WINNER_PRIZES.map(p=>
-      '<div class="hp-card"><span class="ic">'+p.icon+'</span><b>'+esc(p.name)+'</b><span class="tier">'+esc(p.tier)+'</span></div>'
-    ).join('');
-    return '<div class="home-prizes"><div class="hd"><h3>Prizes to be won</h3><button data-nav="wallet" style="border:0; background:none; padding:0; font-size:11px; font-weight:700; color:var(--brand); cursor:pointer;">See all &rarr;</button></div>'
-      + '<div class="hp-scroll">'+cards+'</div></div>';
+
+  function restrictionBanner(){
+    const r = restriction();
+    if(!r) return '';
+    const until = r.until ? ' Until '+new Date(r.until).toLocaleString('en-IN', { dateStyle:'medium', timeStyle:'short' })+'.' : '';
+    return '<div class="callout warn" role="status"><strong>'+esc(r.message)+'</strong>'+esc(until)+'</div>';
   }
   function renderHome(){
     const q = (state.searchQuery||'').trim().toLowerCase();
@@ -655,7 +610,7 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     });
     let cards;
     if(!feedReady()) cards = feedStateHtml();
-    else if(!state.contests.length) cards = '<div class="feed-state"><b>No open questions right now.</b><span>New questions are added through the day &mdash; check back soon.</span></div>';
+    else if(!state.contests.length) cards = '<div class="feed-state"><b>'+t('no_open')+'</b><span>'+t('no_open_sub')+'</span></div>';
     else cards = filtered.map(c=>{
       const def = contestDef(c.id), cat = CAT_MAP[def.category], mine = state.predictions[c.id];
       return '<div class="contest-card" data-open-contest="'+esc(c.id)+'" role="button" tabindex="0">'
@@ -667,18 +622,21 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     }).join('') || '<p class="hint">No questions match &mdash; try another category or search term.</p>';
 
     const filters = '<div class="cat-filters">'
-      + '<button data-filter="all" class="'+(state.catFilter==='all'?'active':'')+'">All</button>'
+      + '<button data-filter="all" class="'+(state.catFilter==='all'?'active':'')+'">'+t('all')+'</button>'
       + CATS.map(c=>'<button data-filter="'+c.key+'" class="'+(state.catFilter===c.key?'active':'')+'"><span class="cat-dot" style="background:'+c.color+';"></span>'+c.label+'</button>').join('')
       + '</div>';
 
-    const openCount = state.contests.filter(c=>c.status==='open').length;
+    const openCount = state.contests.length;
     const sub = feedReady() ? openCount+' question'+(openCount===1?'':'s')+' open &middot; '+formatDateLong(liveNow()) : formatDateLong(liveNow());
-    return '<div class="greet"><div><h2>Namaste, '+esc(state.user.name)+(state.selfieVerified?' '+verifiedBadgeIcon():'')+' '+rankBadgeChip(lifetimeEarned())+(state.flags.plus && state.plus?' <span class="plus-badge">'+(state.plusTier==='pro'?'Plus Pro':'Plus')+'</span>':'')+'</h2><div class="sub">'+sub+'</div></div></div>'
-      + '<div class="balance-card"><div class="k">Foreseez Points</div><div class="v mono">'+fmtNum(balance())+'</div></div>'
-      + renderHomePrizeStrip()
+    const name = state.me ? state.me.display_name : '';
+    const bal = state.me ? fmtNum(balance()) : '&mdash;';
+    const committed = committedPoints() ? '<div class="sub-k">'+fmtNum(committedPoints())+' '+t('committed')+'</div>' : '';
+    return restrictionBanner()
+      + '<div class="greet"><div><h2>'+t('namaste')+(name ? ', '+esc(name) : '')+' '+(state.me ? rankBadgeChip(lifetimeEarned()) : '')+'</h2><div class="sub">'+sub+'</div></div></div>'
+      + '<div class="balance-card"><div class="k">'+t('points')+'</div><div class="v mono">'+bal+'</div>'+committed+'</div>'
       + renderNewsTicker()
-      + '<div class="search-row"><input id="searchInput" type="search" placeholder="Search questions…" aria-label="Search questions" value="'+esc(state.searchQuery||'')+'">'
-      + '<div class="sort-toggle"><button data-sort="closing" class="'+(state.sortMode==='closing'?'active':'')+'">Closing soon</button><button data-sort="trending" class="'+(state.sortMode==='trending'?'active':'')+'">Trending</button></div></div>'
+      + '<div class="search-row"><input id="searchInput" type="search" placeholder="'+t('search')+'" aria-label="Search questions" value="'+esc(state.searchQuery||'')+'">'
+      + '<div class="sort-toggle"><button data-sort="closing" class="'+(state.sortMode==='closing'?'active':'')+'">'+t('closing_soon')+'</button><button data-sort="trending" class="'+(state.sortMode==='trending'?'active':'')+'">'+t('trending')+'</button></div></div>'
       + filters + '<div>' + cards + '</div>';
   }
   function tickerItem(n, duplicate){
@@ -697,79 +655,94 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       + '<div class="news-track-wrap"><div class="news-track">'+first+sep+'<span aria-hidden="true">'+second+'</span></div></div></div>';
   }
 
-  // Pulse: the product's actual differentiator made visible on-screen. Every
-  // open contest already carries a live pool.yes/pool.no split — this screen
-  // does nothing but aggregate that same real data up to category level and
-  // surface it as a first-class destination, instead of leaving it implicit
-  // inside individual contest cards. Framed explicitly as "not a market" so
-  // it reads as a data/insights product, not a Kalshi/Polymarket clone.
-  function pulseStats(){
-    const open = state.contests.filter(c=>c.status==='open').map(c=>contestDef(c.id)).filter(Boolean);
-    const byCat = {};
-    CATS.forEach(cat=>{ byCat[cat.key] = { count:0, calls:0, leanSum:0, leanN:0 }; });
-    let totalCalls = 0;
-    const ranked = [];
-    open.forEach(def=>{
-      const b = byCat[def.category];
-      if(!b) return;
-      b.count += 1; b.calls += def.participants; totalCalls += def.participants;
-      const p = chancePct(def, 'yes');
-      if(p!==null && !def.chanceHidden && def.participants >= MIN_GROUP){
-        const lean = Math.max(p, 100-p);
-        b.leanSum += lean*def.participants; b.leanN += def.participants;
-        ranked.push({ id:def.id, def, conf:lean, total:def.participants });
-      }
-    });
-    return { open, byCat, totalCalls, ranked };
+  // Pulse: the national sentiment dashboard. Aggregates only, computed on the server, and
+  // nothing for any group under the minimum size (spec s.6).
+  function pct(x){ return x===null || x===undefined ? '&mdash;' : Math.round(x*100)+'%'; }
+  function shiftText(x){
+    if(x===null || x===undefined) return '';
+    const p = Math.round(x*100);
+    return p===0 ? 'no change today' : (p>0?'&#9650; ':'&#9660; ')+Math.abs(p)+' pts today';
+  }
+  function sparkline(trend){
+    const pts = trend.map(p=>p.chance_yes).filter(v=>v!==null);
+    if(pts.length < 2) return '';
+    const w = 120, h = 28;
+    const d = trend.map((p,i)=> p.chance_yes===null ? null : [i*(w/(trend.length-1)), h - p.chance_yes*h]).filter(Boolean)
+      .map((xy,i)=>(i?'L':'M')+xy[0].toFixed(1)+' '+xy[1].toFixed(1)).join(' ');
+    return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" width="'+w+'" height="'+h+'" aria-hidden="true"><path d="'+d+'" fill="none" stroke="var(--brand)" stroke-width="1.8"/></svg>';
   }
   function renderPulse(){
-    const head = '<div class="dash-head"><div><h2 style="font-size:19px;">Pulse &mdash; what India foresees</h2>'
-      + '<p>Aggregated across every open question. No money, no trading &mdash; this is what the crowd believes, captured before the answer is known.</p></div>'
+    const head = '<div class="dash-head"><div><h2 style="font-size:19px;">'+t('pulse_title')+'</h2>'
+      + '<p>What the crowd believes across every open question, captured before the answer is known. Aggregates only.</p></div>'
       + '<span class="live-label"><span class="live-dot"></span>Live</span></div>';
-    if(!feedReady()) return head + feedStateHtml();
-    const { open, byCat, totalCalls, ranked } = pulseStats();
-    const activeCats = CATS.filter(cat => byCat[cat.key].count);
-    const tiles = activeCats.map(cat=>{
-      const b = byCat[cat.key];
-      const enough = b.calls >= MIN_GROUP && b.leanN > 0;
-      return '<div class="tile callout" style="border-color:color-mix(in srgb, '+cat.color+' 35%, var(--border));">'
-        + '<div class="top"><span class="cat-dot" style="background:'+cat.color+';"></span>'+cat.label+'</div>'
-        + (enough
-            ? '<div class="val">'+Math.round(b.leanSum/b.leanN)+'%</div><div class="delta" style="color:var(--ink-muted); font-weight:600;">average lean to the larger side</div>'
-            : '<div class="val" style="font-size:15px;">Gathering calls</div><div class="delta" style="color:var(--ink-muted); font-weight:600;">Shown once '+MIN_GROUP+'+ calls are in</div>')
-        + '<div class="hint" style="margin-top:6px;">'+b.count+' open question'+(b.count===1?'':'s')+' &middot; '+callsText(b.calls)+'</div>'
-        + '</div>';
-    }).join('');
-    function insightRow(r){
-      const cat = CAT_MAP[r.def.category];
-      return '<div class="feed-row" data-open-contest="'+esc(r.id)+'" role="button" tabindex="0" style="cursor:pointer;">'
-        + '<span class="who"><span class="cat-dot" style="background:'+cat.color+'; margin-right:6px;"></span>'+esc(r.def.title)+'</span>'
-        + '<span class="meta">'+r.conf+'% lean &middot; '+callsText(r.total)+'</span></div>';
+    if(!state.flags.sentiment_dashboard) return head + '<p class="hint">The dashboard isn&rsquo;t available in your region right now.</p>';
+    const d = state.sentiment;
+    if(!d){
+      if(state.sentimentError) return head + '<div class="feed-state error"><b>Couldn&rsquo;t load the dashboard.</b><button class="btn btn-sm" id="btnRetrySentiment">'+t('retry')+'</button></div>';
+      return head + '<div class="feed-state loading"><span class="spinner"></span>'+t('loading')+'</div>';
     }
-    const decisive = ranked.slice().sort((a,b)=>b.conf-a.conf).slice(0,3);
-    const contested = ranked.slice().sort((a,b)=>a.conf-b.conf).slice(0,3);
-    const thin = '<p class="hint">Appears once a question has '+MIN_GROUP+'+ calls.</p>';
-    return head
-      + '<div class="callout" style="margin-bottom:16px;"><strong>'+callsText(totalCalls)+'</strong> across <strong>'+open.length+' open question'+(open.length===1?'':'s')+'</strong> in '+activeCats.length+' categor'+(activeCats.length===1?'y':'ies')+'. Readings appear only for groups of '+MIN_GROUP+' or more, so no individual call can be singled out.</div>'
+    const tiles = d.categories.map(c=>{
+      const cat = CAT_MAP[c.key] || { color:'var(--border)' };
+      return '<div class="tile callout" style="border-color:color-mix(in srgb, '+cat.color+' 35%, var(--border));">'
+        + '<div class="top"><span class="cat-dot" style="background:'+cat.color+';"></span>'+esc(c.label)+'</div>'
+        + (c.enough_data
+            ? '<div class="val">'+pct(c.average_lean)+'</div><div class="delta" style="color:var(--ink-muted); font-weight:600;">average lean to the larger side &middot; '+fmtNum(c.participants)+' people</div>'
+            : '<div class="val" style="font-size:15px;">Gathering calls</div><div class="delta" style="color:var(--ink-muted); font-weight:600;">Shown once '+d.min_group+'+ people take part</div>')
+        + '<div class="hint" style="margin-top:6px;">'+c.questions+' question'+(c.questions===1?'':'s')+'</div></div>';
+    }).join('');
+    function row(q){
+      const cat = CAT_MAP[q.category] || { color:'var(--border)' };
+      return '<div class="feed-row" data-open-contest="'+esc(q.id)+'" role="button" tabindex="0" style="cursor:pointer;">'
+        + '<span class="who"><span class="cat-dot" style="background:'+cat.color+'; margin-right:6px;"></span>'+esc(q.title)+'</span>'
+        + '<span class="meta">'+pct(q.chance_yes)+' &ldquo;'+esc(q.yes_label)+'&rdquo; &middot; '+shiftText(q.shift_24h)+' '+sparkline(q.trend||[])+'</span></div>';
+    }
+    const thin = '<p class="hint">Appears once a question has '+d.min_group+'+ participants.</p>';
+    const quiet = d.election_restricted ? '<div class="callout">Some election questions are hidden during an election quiet period.</div>' : '';
+    return head + quiet
+      + '<div class="callout" style="margin-bottom:16px;"><strong>'+d.questions_shown+'</strong> of '+d.questions_considered+' recent questions have enough participants to show. Readings appear only for groups of '+d.min_group+' or more, so no individual call can be singled out.</div>'
       + (tiles ? '<div class="tiles">'+tiles+'</div>' : '<p class="hint">No open questions right now.</p>')
-      + '<div class="chart-card callout"><h3 style="margin-bottom:2px;">Most decisive</h3><p class="hint" style="margin-bottom:8px;">Where the crowd is most confident.</p>'
-      + (decisive.map(insightRow).join('') || thin) + '</div>'
-      + '<div class="chart-card callout"><h3 style="margin-bottom:2px;">Most contested</h3><p class="hint" style="margin-bottom:8px;">Where the crowd is split down the middle.</p>'
-      + (contested.map(insightRow).join('') || thin) + '</div>';
+      + '<div class="chart-card callout"><h3 style="margin-bottom:2px;">Biggest moves today</h3><p class="hint" style="margin-bottom:8px;">How consensus shifted in the last 24 hours.</p>' + (d.movers.map(row).join('') || thin) + '</div>'
+      + '<div class="chart-card callout"><h3 style="margin-bottom:2px;">Most decisive</h3><p class="hint" style="margin-bottom:8px;">Where the crowd is most confident.</p>' + (d.decisive.map(row).join('') || thin) + '</div>'
+      + '<div class="chart-card callout"><h3 style="margin-bottom:2px;">Most contested</h3><p class="hint" style="margin-bottom:8px;">Where the crowd is split down the middle.</p>' + (d.contested.map(row).join('') || thin) + '</div>';
   }
 
+  function resultBox(def, mine){
+    const r = def.result;
+    if(!r) return '';
+    const label = r.result==='void' ? 'Voided: every committed point was returned'+(r.reason ? ' ('+esc(r.reason.toLowerCase())+')' : '')
+      : 'Result: &ldquo;'+esc(r.result==='yes'?def.yes:def.no)+'&rdquo;';
+    let yours = '';
+    if(mine){
+      if(mine.status==='correct') yours = '<p>Your call was correct: <strong>'+fmtNum(mine.released)+' points released</strong>.</p>';
+      else if(mine.status==='incorrect') yours = '<p>Your call didn&rsquo;t match the result.</p>';
+      else if(mine.status==='refunded') yours = '<p>Your '+fmtNum(mine.staked)+' points were returned.</p>';
+    }
+    const windowOpen = r.dispute_until && new Date(r.dispute_until) > liveNow();
+    let dispute = '';
+    if(mine && windowOpen && r.result!=='void'){
+      dispute = state._disputeOpen
+        ? '<div class="field"><label for="disputeInput">What&rsquo;s wrong with this result?</label><textarea id="disputeInput" maxlength="1000" rows="3"></textarea></div>'
+          + '<div class="field"><label for="disputeLink">Link to evidence (optional, https)</label><input id="disputeLink" type="url" maxlength="500"></div>'
+          + '<button class="btn btn-sm" id="btnSendDispute" '+(busy('dispute')?'disabled':'')+'>Send dispute</button>'
+        : '<button class="link-btn" id="btnOpenDispute">Dispute this result</button> <span class="hint">until '+new Date(r.dispute_until).toLocaleString('en-IN',{dateStyle:'medium', timeStyle:'short'})+'</span>';
+    }
+    return '<div class="resolve-box"><h4>'+label+'</h4>'+yours
+      + (r.source_url ? '<a href="'+esc(r.source_url)+'" target="_blank" rel="noopener noreferrer">Source used &rarr;</a>' : '')
+      + (dispute ? '<div style="margin-top:8px;">'+dispute+'</div>' : '') + '</div>';
+  }
   function renderContestSheet(id){
     const def = contestDef(id);
+    if(def===undefined || (def===null && state.extraDefs[id]===undefined)) return { title:'Question', body:'<p class="hint">'+t('loading')+'</p>' };
     if(!def) return { title:'Question', body:'<p class="hint">This question is no longer available.</p>' };
-    const c = state.contests.find(x=>x.id===id) || { status:'open' };
     const cat = CAT_MAP[def.category];
     const yesPct = chancePct(def, 'yes');
     const noPct = yesPct===null ? null : 100 - yesPct;
     const mine = state.predictions[id];
     const sel = state._sheetSel || (mine ? mine.option : null);
     const amt = (state._sheetStake===undefined || state._sheetStake===null) ? 50 : state._sheetStake;
-    const isOpen = c.status==='open' && def.status==='open' && def.closes && def.closes > liveNow();
+    const isOpen = def.status==='open' && def.closes && def.closes > liveNow();
     const res = def.resolution || {};
+    const r = rules();
 
     let body = '<span class="chip" style="background:color-mix(in srgb, '+cat.color+' 16%, transparent); color:'+cat.color+'; margin-bottom:8px;"><span class="chip-dot"></span>'+cat.label+'</span>'
       + '<h3 style="font-size:15.5px; margin-top:4px;">'+esc(def.title)+'</h3>'
@@ -777,14 +750,17 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       + (def.context && def.context.link ? '<p class="hint">Context: <a href="'+esc(def.context.link)+'" target="_blank" rel="noopener noreferrer">'+esc(def.context.headline)+'</a></p>' : '')
       + chanceBlock(def)
       + '<div class="meta" style="margin-top:4px; display:flex; justify-content:space-between;"><span>'+closesText(def)+'</span><span class="vol">'+callsText(def.participants)+'</span></div>'
-      + '<div class="resolve-box"><h4>How this resolves</h4><p>'+esc(res.rule || '')+'</p>'
+      + resultBox(def, mine)
+      + '<div class="resolve-box"><h4>'+t('how_resolves')+'</h4><p>'+esc(res.rule || '')+'</p>'
       + (res.source_url ? '<a href="'+esc(res.source_url)+'" target="_blank" rel="noopener noreferrer">Official source &rarr;</a>' : '')
+      + '<p class="hint" style="margin-top:6px;">Points you could earn: points committed &times; total points on the question &divide; points on the correct outcome. If nobody picks the correct outcome, or everyone picks the same one, the question is voided and every point is returned.</p>'
       + '</div>';
 
     if(!isOpen){
-      body += '<div class="callout" style="margin-top:10px;">'+(def.status==='paused'
+      if(!def.result) body += '<div class="callout" style="margin-top:10px;">'+(def.status==='paused'
         ? 'Calls are paused on this question for now.'
         : 'This question has closed. The result will be confirmed from the official source above.')+'</div>';
+      if(mine && !def.result) body += '<div class="callout">You committed <strong>'+fmtNum(mine.staked)+' pts</strong> to &ldquo;'+esc(mine.option==='yes'?def.yes:def.no)+'&rdquo;. Awaiting the result.</div>';
     } else {
       body += '<div class="opt-grid" style="margin-top:12px;">'
         + optBtn('yes', def.yes, yesPct, sel, mine)
@@ -792,106 +768,181 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
         + '</div>';
       if(mine){
         body += '<div class="callout">You committed <strong>'+fmtNum(mine.staked)+' pts</strong> to &ldquo;'+esc(mine.option==='yes'?def.yes:def.no)+'&rdquo;. Awaiting the result.</div>';
+      } else if(restriction()){
+        body += restrictionBanner();
+      } else if(!state.flags.forecasting){
+        body += '<p class="hint">Making calls isn&rsquo;t available in your region right now.</p>';
       } else {
         const limitHint = callsLeftToday()+' of '+dailyCallCap()+' daily calls left';
-        body += '<div class="field" style="margin-top:6px;"><label for="stakeInput">Points to commit</label><input class="mono" id="stakeInput" type="number" inputmode="numeric" min="10" max="'+balance()+'" value="'+esc(amt)+'"></div>'
+        const max = Math.min(balance(), r.call_max_points);
+        body += '<div class="field" style="margin-top:6px;"><label for="stakeInput">'+t('points_to_commit')+'</label><input class="mono" id="stakeInput" type="number" inputmode="numeric" min="'+r.call_min_points+'" max="'+max+'" value="'+esc(amt)+'"></div>'
           + '<div class="chip-row">'
           + [25,50,100,250].map(v=>'<button data-chip="'+v+'">'+v+'</button>').join('')
           + '<button data-chip="max">Max</button></div>'
-          + '<button class="btn btn-primary btn-block" id="btnPlacePrediction" '+(sel&&callsLeftToday()>0?'':'disabled')+'>Make your call</button>'
-          + '<p class="hint" style="margin:8px 0 0; text-align:center;">'+limitHint+'</p>'
-          + '<p class="news-note" style="margin-top:8px; text-align:center;">Preview: calls stay on this device and don&rsquo;t count toward the public chance until sign-in launches.</p>';
+          + '<button class="btn btn-primary btn-block" id="btnPlacePrediction" '+(sel&&callsLeftToday()>0&&!busy('call')?'':'disabled')+'>'+(busy('call')?t('loading'):t('make_call'))+'</button>'
+          + '<p class="hint" style="margin:8px 0 0; text-align:center;">'+limitHint+' &middot; '+r.call_min_points+'&ndash;'+r.call_max_points+' points per call</p>';
       }
     }
-    body += '<div class="discuss"><h4>Debate</h4><p class="hint" style="margin:0;">Comments, replies and voice notes open with sign-in. Every post is checked before it appears.</p></div>';
+    body += renderThread(id);
     return { title: def.title, body };
   }
-  function optBtn(key,label,pct,sel,mine){
+  function optBtn(key,label,pct_,sel,mine){
     const disabled = !!mine;
     return '<button class="opt-btn '+key+' '+(sel===key?'sel':'')+'" data-opt="'+key+'" '+(disabled?'disabled style="opacity:.6;"':'')+'>'
-      + '<span class="lbl">'+esc(label)+'</span><span class="chance-val">'+(pct===null?'&mdash;':pct+'%')+'</span>'
+      + '<span class="lbl">'+esc(label)+'</span><span class="chance-val">'+(pct_===null?'&mdash;':pct_+'%')+'</span>'
       + '<span style="font-size:10px; color:var(--ink-muted); font-weight:600;">current chance</span></button>';
   }
 
-  /* ============ ledger / leaderboard / wallet / profile ============ */
-  const LEDGER_META = {
-    signup:{label:'Signup reward', color:'good'}, kyc:{label:'Verification reward', color:'good'},
-    checkin:{label:'Daily check‑in', color:'good'}, stake:{label:'Points committed', color:'muted'},
-    win:{label:'Call correct', color:'good'}, lose:{label:'Call resolved', color:'muted'}
+  /* ============ my calls / ledger / leaderboard / rewards / profile ============ */
+  const LEDGER_LABEL = {
+    signup_reward:'Welcome reward', checkin_reward:'Daily check-in reward', quiz_reward:'Daily quiz reward',
+    call_commit:'Points committed', call_settle:'Call settled', call_refund:'Points returned', reversal:'Correction'
   };
-  function ledgerIcon(type){
-    const good = type==='win'||type==='signup'||type==='kyc'||type==='checkin';
-    const bg = good ? 'color-mix(in srgb, var(--status-good) 18%, transparent)' : 'var(--surface-3)';
-    const fg = good ? 'var(--status-good)' : 'var(--ink-muted)';
-    const glyph = type==='stake' ? '&#8722;' : good ? '&#8593;' : '&#8226;';
-    return '<div class="ico" style="background:'+bg+'; color:'+fg+'; font-weight:700; font-size:14px;">'+glyph+'</div>';
+  const CALL_STATUS = { active:['Awaiting result','warn'], correct:['Correct','good'], incorrect:['Settled','muted'], refunded:['Returned','muted'] };
+  function renderMyCalls(){
+    if(!state.myCalls.length) return '<p class="hint" style="margin-top:12px;">No calls yet. Pick a question on Home and make your first call.</p>';
+    return '<div class="card" style="padding:2px 14px; margin-top:8px;">' + state.myCalls.map(c=>{
+      const st = CALL_STATUS[c.status] || [c.status,'muted'];
+      const outcome = c.status==='correct' ? '+'+fmtNum(c.released)+' released' : c.status==='refunded' ? fmtNum(c.released)+' returned' : fmtNum(c.points)+' committed';
+      return '<div class="ledger-row" data-open-contest="'+esc(c.question_id)+'" role="button" tabindex="0" style="cursor:pointer;">'
+        + '<div class="txt"><b>'+esc(c.question_title||'Question')+'</b><span>'+esc(c.outcome_label||c.outcome_key)+' &middot; <span class="chip chip-status-'+st[1]+'" style="padding:1px 7px;">'+st[0]+'</span></span></div>'
+        + '<div class="amt">'+outcome+'</div></div>';
+    }).join('') + '</div>';
+  }
+  function renderPointsLedger(){
+    if(state.ledgerError && !state.ledgerItems.length) return '<div class="feed-state error"><b>Couldn&rsquo;t load your ledger.</b><button class="btn btn-sm" id="btnRetryLedger">'+t('retry')+'</button></div>';
+    if(!state.ledgerItems.length) return '<p class="hint" style="margin-top:12px;">'+t('loading')+'</p>';
+    const rows = state.ledgerItems.map(e=>{
+      const a = e.available_change;
+      const sign = a>0 ? '+' : a<0 ? '−' : '';
+      const good = a>0;
+      const committedNote = e.committed_change ? '<small>'+(e.committed_change>0?'+':'−')+fmtNum(Math.abs(e.committed_change))+' committed</small>' : '';
+      return '<div class="ledger-row"><div class="ico" style="background:'+(good?'color-mix(in srgb, var(--status-good) 18%, transparent)':'var(--surface-3)')+'; color:'+(good?'var(--status-good)':'var(--ink-muted)')+'; font-weight:700;">'+(good?'&#8593;':a<0?'&#8722;':'&#8226;')+'</div>'
+        + '<div class="txt"><b>'+esc(LEDGER_LABEL[e.kind]||e.kind)+'</b><span>'+(e.memo && !e.memo.startsWith(LEDGER_LABEL[e.kind]||' ') ? esc(e.memo)+' &middot; ' : '')+new Date(e.created_at).toLocaleString('en-IN',{dateStyle:'medium', timeStyle:'short'})+'</span></div>'
+        + '<div class="amt" style="color:'+(good?'var(--status-good)':'var(--ink)')+';">'+sign+fmtNum(Math.abs(a))+committedNote+'</div></div>';
+    }).join('');
+    const more = state.ledgerCursor ? '<button class="btn btn-sm btn-block" id="btnMoreLedger" style="margin-top:8px;">Show more</button>' : '';
+    return '<p class="hint">Append-only. Every reward, commitment and return is a permanent entry; corrections are new entries.</p><div class="card" style="padding:2px 14px; margin-top:8px;">'+rows+'</div>'+more;
   }
   function renderLedger(){
-    if(!state.ledger.length) return '<p class="hint" style="margin-top:16px;">No activity yet.</p>';
-    const rows = state.ledger.slice().reverse().map(e=>{
-      const sign = e.amount>0 ? '+' : e.amount<0 ? '−' : '';
-      return '<div class="ledger-row">'+ledgerIcon(e.type)
-        + '<div class="txt"><b>'+esc(e.label)+'</b><span>'+e.ts+'</span></div>'
-        + '<div class="amt" style="color:'+(e.amount>0?'var(--status-good)':e.amount<0?'var(--ink)':'var(--ink-muted)')+';">'+sign+(e.amount?fmtNum(Math.abs(e.amount)):'0')+'<small>bal '+fmtNum(e.balanceAfter)+'</small></div></div>';
-    }).join('');
-    return '<h2 style="font-size:16px; margin:14px 0 4px;">Points ledger</h2><p class="hint">Append‑only. Every earn, commitment and reward is a permanent event.</p><div class="card" style="padding:2px 14px; margin-top:8px;">'+rows+'</div>';
+    const tab = state.ledgerTab;
+    return '<h2 style="font-size:16px; margin:14px 0 8px;">'+t('my_calls')+'</h2>'
+      + '<div class="sort-toggle" style="margin-bottom:8px;"><button data-ledger-tab="calls" class="'+(tab==='calls'?'active':'')+'">'+t('my_calls')+'</button><button data-ledger-tab="ledger" class="'+(tab==='ledger'?'active':'')+'">'+t('points_ledger')+'</button></div>'
+      + (tab==='calls' ? renderMyCalls() : renderPointsLedger());
   }
 
   function renderLeaderboard(){
-    return '<h2 style="font-size:16px; margin:14px 0 4px;">Leaderboards</h2>'
-      + '<p class="hint" style="margin-bottom:10px;">Daily, weekly and all-time rankings by lifetime points earned &mdash; committing points to a call never lowers your rank.</p>'
+    const p = state.lbPeriod;
+    const tabs = [['daily',t('daily')],['weekly',t('weekly')],['all',t('all_time')]].map(([k,l])=>'<button data-lb="'+k+'" class="'+(p===k?'active':'')+'">'+l+'</button>').join('');
+    let list;
+    if(!state.flags.leaderboards) list = '<p class="hint">Leaderboards aren&rsquo;t available in your region right now.</p>';
+    else {
+      const board = state.lb[p];
+      if(!board) list = state.lbError ? '<div class="feed-state error"><b>Couldn&rsquo;t load rankings.</b><button class="btn btn-sm" id="btnRetryLb">'+t('retry')+'</button></div>' : '<p class="hint">'+t('loading')+'</p>';
+      else if(!board.entries.length) list = '<div class="feed-state"><b>No points earned yet in this period.</b><span>Check in, answer the quiz or make a correct call to appear here.</span></div>';
+      else {
+        list = '<div class="card" style="padding:2px 14px;">' + board.entries.map(e=>
+          '<div class="ledger-row'+(e.is_you?' you':'')+'"><div class="ico" style="font-weight:800;">'+e.position+'</div>'
+          + '<div class="txt"><b>'+avatarOf(e.avatar)+' '+esc(e.display_name)+(e.is_you?' (you)':'')+'</b><span>'+esc(e.tier)+'</span></div>'
+          + '<div class="amt">'+fmtNum(e.points)+' pts</div></div>').join('') + '</div>';
+        if(board.you && !board.entries.some(e=>e.is_you)) list += '<p class="hint" style="margin-top:8px;">You: '+fmtNum(board.you.points)+' pts'+(board.you.position ? ' &middot; position '+fmtNum(board.you.position) : '')+'</p>';
+      }
+    }
+    return '<h2 style="font-size:16px; margin:14px 0 4px;">'+t('leaderboards')+'</h2>'
+      + '<p class="hint" style="margin-bottom:10px;">Ranked by points earned &mdash; committing points to a call never lowers your rank.</p>'
       + renderRankCard()
-      + '<div class="feed-state"><b>Rankings open with sign-in.</b><span>Once calls are recorded, you&rsquo;ll see where you stand against everyone forecasting on Bharat Foreseez.</span></div>';
+      + '<div class="sort-toggle" style="margin:12px 0 8px;">'+tabs+'</div>' + list;
+  }
+
+  function renderBadges(){
+    const list = (state.me && state.me.badges) || [];
+    if(!list.length) return '';
+    return '<div class="badge-grid">' + list.map(b=>'<div class="badge-tile'+(b.earned?' on':'')+'" title="'+esc(b.description)+'"><span class="e">'+esc(b.emoji)+'</span><b>'+esc(b.name)+'</b>'
+      + '<span class="hint">'+(b.earned ? 'Earned' : fmtNum(b.progress)+' / '+fmtNum(b.threshold))+'</span></div>').join('') + '</div>';
+  }
+  function renderQuiz(){
+    if(!state.flags.quiz) return '';
+    const q = state.quiz;
+    if(q===undefined) return '';
+    if(!q) return '<div class="earn-item"><div><b>'+t('daily_quiz')+'</b><span>No quiz today. Check back tomorrow.</span></div></div>';
+    let body = '<div class="quiz"><b>'+t('daily_quiz')+'</b><p>'+esc(q.question)+'</p><div class="quiz-opts">';
+    body += q.options.map(o=>{
+      let cls = '';
+      if(q.answered){ cls = o.key===q.correct_key ? ' right' : (o.key===q.your_answer ? ' wrong' : ''); }
+      return '<button class="btn btn-sm'+cls+'" data-quiz="'+esc(o.key)+'" '+(q.answered||busy('quiz')?'disabled':'')+'>'+esc(o.label)+'</button>';
+    }).join('') + '</div>';
+    if(q.answered) body += '<p class="hint">'+(q.correct ? 'Correct! +'+fmtNum(q.reward_received)+' pts.' : 'Not quite.')+(q.explanation ? ' '+esc(q.explanation) : '')+'</p>';
+    else body += '<p class="hint">A correct answer earns '+fmtNum(q.reward)+' points.</p>';
+    return body + '</div>';
   }
   function renderWallet(){
-    let html = '<h2 style="font-size:16px; margin:14px 0 4px;">Wallet</h2>'
-      + '<div class="balance-card" style="margin-top:8px;"><div class="k">Balance</div><div class="v mono">'+fmtNum(balance())+' pts</div></div>'
-      + '<div class="callout" style="margin-bottom:12px;"><strong>Foreseez Points are earned, never sold.</strong> They have no cash value and can&rsquo;t be bought, withdrawn or transferred. They are used only to make calls.</div>'
-      + '<div class="earn-item"><div><b>Daily check&#8209;in</b><span>A fixed reward, once a day</span></div><button class="btn btn-sm" id="btnCheckin" '+(state.checkedIn?'disabled':'')+'>'+(state.checkedIn?'Done':'+50 pts')+'</button></div>'
-      + '<div class="earn-item"><div><b>Age &amp; identity confirmed</b><span>One-time verification reward</span></div><span class="chip chip-status-good">Earned</span></div>';
-    if(state.flags.plus) html += renderPlusCards();
-    if(state.flags.user_created_polls) html += renderMyPolls();
-    if(state.flags.prizes) html += renderWinnerPrizes();
-    return html;
+    const ci = state.me ? state.me.checkin : null;
+    const checkin = !state.flags.checkin ? '' : '<div class="earn-item"><div><b>'+t('daily_checkin')+'</b><span>'
+      + (ci ? (ci.streak ? ci.streak+'-day streak &middot; ' : '')+'+'+ci.reward+' pts a day' : '')+'</span></div>'
+      + '<button class="btn btn-sm" id="btnCheckin" '+(!ci||ci.checked_in_today||busy('checkin')||restriction()?'disabled':'')+'>'+(ci&&ci.checked_in_today?'Done today':'Check in')+'</button></div>';
+    return '<h2 style="font-size:16px; margin:14px 0 4px;">'+t('rewards')+'</h2>'
+      + '<div class="balance-card" style="margin-top:8px;"><div class="k">Available</div><div class="v mono">'+fmtNum(balance())+' pts</div>'
+      + (committedPoints() ? '<div class="sub-k">'+fmtNum(committedPoints())+' '+t('committed')+'</div>' : '') + '</div>'
+      + '<div class="callout" style="margin-bottom:12px;"><strong>Foreseez Points are earned, never sold.</strong> They have no cash value and can&rsquo;t be bought, withdrawn or transferred. Rewards are status only: ranks, badges and standing.</div>'
+      + checkin + renderQuiz()
+      + '<h3 style="font-size:13px; margin:18px 0 8px;">'+t('badges')+'</h3>' + renderBadges()
+      + renderInvites();
   }
-  // Phase 2 (behind flags, off in Phase 1): Plus access tiers and partner prizes.
-  function renderPlusCards(){
-    return '<div class="plus-card"><div class="hd"><b style="font-size:13.5px;">Foreseez Plus</b>'+(state.plusTier==='plus'?'<span class="plus-badge">Active</span>':'')+'</div>'
-      + '<p>A flat monthly access fee. Unlocks an ad&#8209;free feed, a profile badge, a higher daily limit (25 calls instead of 10) and deeper accuracy statistics. It never buys or credits points.</p>'
-      + (state.plusTier ? '<button class="btn btn-sm" disabled>Subscribed</button>' : '<button class="btn btn-primary btn-sm" id="btnSubscribePlus">Subscribe to Plus</button>')
-      + '</div>';
+  function renderInvites(){
+    if(!state.flags.invites || !state.me) return '';
+    const inv = state.me.invites;
+    const link = location.origin + location.pathname + '?invite=' + encodeURIComponent(inv.code || '');
+    return '<h3 style="font-size:13px; margin:18px 0 8px;">Invite friends</h3><div class="card" style="padding:12px 14px;">'
+      + '<p class="hint" style="margin:0 0 8px;">Share your link. '+fmtNum(inv.joined)+' friend'+(inv.joined===1?' has':'s have')+' joined. Invites count toward the Connector badge.</p>'
+      + '<div class="comment-form"><input id="inviteLink" readonly value="'+esc(link)+'"><button class="btn btn-sm" id="btnCopyInvite">Copy</button></div></div>';
   }
-  function renderWinnerPrizes(){
-    const cards = WINNER_PRIZES.map(p=>'<div class="winner-card"><span class="ic">'+p.icon+'</span><span class="tag">'+esc(p.tag)+'</span><b>'+esc(p.name)+'</b><span class="hint">'+esc(p.desc)+'</span><span class="tier">'+esc(p.tier)+'</span></div>').join('');
-    return '<h3 style="font-size:13px; margin:18px 0 8px;">Partner prizes &mdash; top players</h3><div class="winner-grid" style="margin-bottom:18px;">'+cards+'</div>';
-  }
-  // Rank card: a screenshot-worthy summary of the player's current named
-  // badge, built specifically so a proud "Mahadrishta" or "Hall of
-  // Famer" has something worth sharing outside the app, not just a number
-  // buried in a leaderboard row.
+  // Rank card: a screenshot-worthy summary of the player's current named tier.
   function renderRankCard(){
     const pts = lifetimeEarned();
     const tier = rankTierFor(pts);
-    const next = RANK_TIERS.find(t => t.min > pts);
+    const next = tiers().find(t_ => t_.min > pts);
     return '<div class="rank-card" style="background:'+tier.color+';">'
       + '<div class="rank-card-top"><span class="rank-emoji">'+tier.emoji+'</span><span>'+esc(tier.name)+'</span></div>'
-      + '<div class="rank-card-pts">'+fmtNum(pts)+' pts</div>'
+      + '<div class="rank-card-pts">'+fmtNum(pts)+' pts earned</div>'
       + (next ? '<div class="rank-card-next">'+fmtNum(next.min-pts)+' pts to '+esc(next.name)+'</div>' : '<div class="rank-card-next">Highest rank achieved</div>')
       + '<button class="btn btn-sm" id="btnShareRank" style="margin-top:12px; background:rgba(255,255,255,.22); color:#fff; border-color:rgba(255,255,255,.45);">Share my rank</button>'
       + '</div>';
   }
   function renderProfile(){
-    return '<h2 style="font-size:16px; margin:14px 0 4px;">Profile</h2>'
-      + renderRankCard()
+    const me = state.me;
+    if(!me) return '<h2 style="font-size:16px; margin:14px 0 4px;">'+t('profile')+'</h2>' + (state.meError ? '<div class="feed-state error"><b>'+esc(errText(state.meError))+'</b><button class="btn btn-sm" id="btnRetryMe">'+t('retry')+'</button></div>' : '<p class="hint">'+t('loading')+'</p>');
+    const s = me.stats;
+    const states = (state.cfg && state.cfg.states) || [];
+    const avatars = Object.keys(AVATARS).map(k=>'<button class="av-pick'+(me.avatar===k?' on':'')+'" data-avatar="'+k+'" aria-label="'+k+'">'+AVATARS[k]+'</button>').join('');
+    const nameRow = state._editingName
+      ? '<div class="comment-form"><input id="nameInput" maxlength="24" value="'+esc(me.display_name)+'"><button class="btn btn-sm" id="btnSaveName">Save</button></div>'
+      : '<b style="font-size:15px;">'+avatarOf(me.avatar)+' '+esc(me.display_name)+'</b> <button class="link-btn" id="btnEditName">Edit</button>';
+    const stateOpts = '<option value="">Not set</option>' + states.map(x=>'<option value="'+esc(x.code)+'"'+(me.region===x.code?' selected':'')+'>'+esc(x.name)+'</option>').join('');
+    const lang = getLang();
+    return '<h2 style="font-size:16px; margin:14px 0 4px;">'+t('profile')+'</h2>'
+      + restrictionBanner()
       + '<div class="card" style="padding:14px 16px; display:flex; flex-direction:column; gap:10px;">'
-      + '<div class="kyc-row"><div class="ico">'+svgIcon('user')+'</div><div class="txt"><b>'+esc(state.user.name)+(state.selfieVerified?' '+verifiedBadgeIcon():'')+(state.plus?' <span class="plus-badge" style="margin-left:4px;">'+(state.plusTier==='pro'?'Plus Pro':'Plus')+'</span>':'')+'</b><span>Signed in via '+esc(state.user.method)+'</span></div></div>'
-      + '<div class="kyc-row"><div class="ico">'+checkIcon()+'</div><div class="txt"><b>Age &amp; consent confirmed</b><span>18+ declared and Terms &amp; Privacy consent given at sign&#8209;up</span></div></div>'
-      + '<div class="kyc-row"><div class="ico">'+(state.phoneVerified?checkIcon():svgIcon('user'))+'</div><div class="txt"><b>Phone verified</b><span>Confirmed by OTP at sign&#8209;up</span></div></div>'
-      + '<div class="kyc-row" style="align-items:center;"><div class="ico">'+(state.selfieVerified?checkIcon():svgIcon('user'))+'</div><div class="txt"><b>'+(state.selfieVerified?'Selfie verified':'Selfie not verified yet')+'</b><span>'+(state.selfieVerified?'Your blue Verified badge is active':'Confirm you’re a real person to earn your Verified badge')+'</span></div>'+(state.selfieVerified?'':'<button class="btn btn-sm" id="btnOpenSelfieSheet" style="flex:none; margin-left:8px;">Get Verified</button>')+'</div>'
+      + '<div>'+nameRow+'</div><div class="av-row">'+avatars+'</div>'
+      + '<div class="field"><label for="regionSelect">Your state</label><select id="regionSelect">'+stateOpts+'</select><span class="hint">Used only for regional settings. Optional.</span></div>'
+      + '<p class="hint" style="margin:0;">Pseudonymous account on this device. Phone sign-in arrives soon; your points and calls will carry over.</p>'
       + '</div>'
+      + renderRankCard()
+      + '<div class="tiles" style="margin-top:12px;">'
+      + '<div class="tile callout"><div class="top">Calls</div><div class="val">'+fmtNum(s.calls)+'</div></div>'
+      + '<div class="tile callout"><div class="top">Accuracy</div><div class="val">'+(s.accuracy===null?'&mdash;':Math.round(s.accuracy*100)+'%')+'</div><div class="hint">'+s.correct+' correct of '+(s.correct+s.incorrect)+' settled</div></div>'
+      + '<div class="tile callout"><div class="top">Best streak</div><div class="val">'+fmtNum(s.longest_streak)+'</div></div></div>'
+      + '<h3 style="font-size:13px; margin:18px 0 8px;">'+t('badges')+'</h3>' + renderBadges()
+      + renderSafeguards()
       + renderGrievanceCard()
-      + '<button class="btn btn-block" id="btnReset" style="margin-top:16px;">Reset preview data</button>'
-      + '<p class="hint" style="text-align:center; margin-top:8px;">Clears calls and points kept on this device.</p>';
+      + renderPrivacy()
+      + '<div class="card" style="padding:12px 14px; margin-top:12px;"><span class="k">'+t('language')+'</span><div class="sort-toggle" style="margin-top:8px;">'
+      + '<button data-lang="en" class="'+(lang==='en'?'active':'')+'">English</button><button data-lang="hi" class="'+(lang==='hi'?'active':'')+'">हिंदी</button></div></div>';
+  }
+  function renderSafeguards(){
+    const days = rules().self_exclusion_days || [1,7,30,90];
+    return '<div class="card" style="padding:12px 14px; margin-top:12px;"><span class="k">'+t('take_break')+'</span>'
+      + '<p class="hint" style="margin:6px 0 8px;">Pause calls and posting for a while. A break can be extended but not cut short. Up to '+dailyCallCap()+' calls a day; you&rsquo;ll get a reminder after '+rules().session_reminder_minutes+' minutes in the app.</p>'
+      + '<div class="chip-row">'+days.map(d=>'<button data-exclude="'+d+'">'+d+' day'+(d===1?'':'s')+'</button>').join('')+'</div></div>';
   }
   function renderGrievanceCard(){
     const g = state.grievance || {};
@@ -899,25 +950,58 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
                   g.email && '<a href="mailto:'+esc(g.email)+'">'+esc(g.email)+'</a>',
                   g.phone && '<span>'+esc(g.phone)+'</span>',
                   g.address && '<span class="hint">'+esc(g.address)+'</span>'].filter(Boolean);
-    return '<div class="card grievance"><span class="k">Help &amp; grievances</span>'
-      + '<span>Raise a concern with our Grievance Officer'+(rows.length ? ':' : '.')+'</span>'
+    const cats = (state.cfg && state.cfg.grievance_categories) || [];
+    const form = state._grievanceOpen
+      ? '<div class="field"><label for="gCat">About</label><select id="gCat">'+cats.map(c=>'<option value="'+esc(c.key)+'">'+esc(c.label)+'</option>').join('')+'</select></div>'
+        + '<div class="field"><label for="gSubject">Subject</label><input id="gSubject" maxlength="140"></div>'
+        + '<div class="field"><label for="gDesc">What happened?</label><textarea id="gDesc" rows="4" maxlength="3000"></textarea></div>'
+        + '<label class="media-consent"><input type="checkbox" id="gConsent"> Let support look at my calls and points for this complaint only.</label>'
+        + '<button class="btn btn-sm btn-primary" id="btnSendGrievance" '+(busy('grievance')?'disabled':'')+'>Send</button> <button class="link-btn" id="btnCancelGrievance">Cancel</button>'
+      : '<button class="btn btn-sm" id="btnOpenGrievance">Raise a complaint</button>';
+    const mine = state.grievances.map(x=>'<div class="ledger-row"><div class="txt"><b>'+esc(x.ref)+' &middot; '+esc(x.subject)+'</b><span>'+esc(x.status.replace('_',' '))
+      + (x.resolution ? ' &middot; '+esc(x.resolution) : (x.updates.length ? ' &middot; '+esc(x.updates[x.updates.length-1].note) : ''))+'</span></div></div>').join('');
+    return '<div class="card grievance" style="margin-top:12px;"><span class="k">'+t('help')+'</span>'
+      + '<span>We acknowledge complaints within 24 hours and resolve them within 15 days.</span>'
+      + form + (mine ? '<div style="margin-top:8px;">'+mine+'</div>' : '')
+      + '<span style="margin-top:8px;">Grievance Officer'+(rows.length ? ':' : '')+'</span>'
       + (rows.length ? rows.join('') : '<span class="hint">Contact details are being finalised.</span>')
+      + '</div>';
+  }
+  function renderPrivacy(){
+    const legal = (state.cfg && state.cfg.legal) || {};
+    const blocks = state.blocks.length ? '<p class="hint" style="margin:8px 0 4px;">Blocked:</p>' + state.blocks.map(b=>'<div class="earn-item"><div><b>'+esc(b.display_name)+'</b></div><button class="btn btn-sm" data-unblock="'+esc(b.user_id)+'">Unblock</button></div>').join('') : '';
+    return '<div class="card" style="padding:12px 14px; margin-top:12px;"><span class="k">'+t('privacy')+'</span>'
+      + '<p class="hint" style="margin:6px 0 8px;">The sentiment dashboard only ever shows anonymous totals. You can download a copy of your data or close your account at any time.</p>'
+      + '<div class="chip-row"><button id="btnExportData">Download my data</button><button id="btnDeleteAccount">Close my account</button></div>'
+      + blocks
+      + ((legal.privacy_notice_url || legal.terms_url) ? '<p class="hint" style="margin-top:8px;">'
+        + (legal.privacy_notice_url ? '<a href="'+esc(legal.privacy_notice_url)+'" target="_blank" rel="noopener">Privacy notice</a> ' : '')
+        + (legal.terms_url ? '<a href="'+esc(legal.terms_url)+'" target="_blank" rel="noopener">Terms</a>' : '') + '</p>' : '')
       + '</div>';
   }
 
   /* ============ phone render / router ============ */
   function renderPhoneNav(){
     if(!state.user.signedIn){ document.getElementById('phoneNav').innerHTML=''; return; }
-    const tabs = [['home','Home'],['pulse','Pulse'],['ledger','Ledger'],['leaderboard','Ranks'],['wallet','Wallet'],['profile','Profile']];
+    const tabs = [['home','nav_home'],['pulse','nav_pulse'],['ledger','nav_ledger'],['leaderboard','nav_ranks'],['wallet','nav_wallet'],['profile','nav_profile']];
     const iconFor = {home:'home',pulse:'pulse',ledger:'ledger',leaderboard:'board',wallet:'wallet',profile:'user'};
     document.getElementById('phoneNav').innerHTML = tabs.map(([key,label])=>
-      '<button data-nav="'+key+'" class="'+(state.phoneScreen===key?'active':'')+'">'+svgIcon(iconFor[key])+label+'</button>'
+      '<button data-nav="'+key+'" class="'+(state.phoneScreen===key?'active':'')+'">'+svgIcon(iconFor[key])+t(label)+'</button>'
     ).join('');
+  }
+  function updateBanner(){
+    const cfg = state.cfg;
+    if(!cfg) return '';
+    if(APP_BUILD < cfg.min_supported_build) return '<div class="update-block"><h2>Update required</h2><p>This version of Bharat Foreseez is no longer supported. Please update the app to continue.</p></div>';
+    if(APP_BUILD < cfg.latest_build) return '<div class="callout">A newer version of the app is available. Update for the latest features and fixes.</div>';
+    return '';
   }
   function renderPhoneBody(){
     let html='';
-    if(!state.user.signedIn) html = renderOnboarding();
-    else if(state.phoneScreen==='home') html = renderHome();
+    const upd = updateBanner();
+    if(upd.indexOf('update-block')>=0) html = upd;
+    else if(!state.user.signedIn) html = renderOnboarding();
+    else if(state.phoneScreen==='home') html = upd + renderHome();
     else if(state.phoneScreen==='pulse') html = renderPulse();
     else if(state.phoneScreen==='ledger') html = renderLedger();
     else if(state.phoneScreen==='leaderboard') html = renderLeaderboard();
@@ -928,52 +1012,13 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
   function renderNotifPanel(){
     const rows = state.notifications.length
       ? state.notifications.map(n=>'<div class="notif-row '+(n.read?'read':'')+'"><span class="dot"></span><div class="txt"><span>'+esc(n.text)+'</span><span class="t">'+n.ts+'</span></div></div>').join('')
-      : '<p class="hint">No notifications yet &mdash; updates on questions you&rsquo;ve called will show up here.</p>';
+      : '<p class="hint">No notifications yet &mdash; results on questions you&rsquo;ve called will show up here.</p>';
     return '<div class="sheet-head"><h3 style="font-size:14px;">Notifications</h3><button class="btn btn-ghost btn-sm" id="btnCloseSheet" aria-label="Close">&#10005;</button></div><div class="sheet-body">'+rows+'</div>';
-  }
-
-  // Plus-subscriber poll creation: the second half of "capture more sentiment
-  // data, not just run another prediction market" — a subscriber asks their
-  // own Yes/No question, it runs in the live feed exactly like every seeded
-  // topic, and every response feeds the same pool.yes/pool.no mechanic that
-  // powers Pulse. No points are spent or charged to publish one.
-  function renderCreatePollSheet(){
-    const d = state._pollDraft || (state._pollDraft = {title:'', yes:'Yes', no:'No', hrs:72});
-    const titleOk = (d.title||'').trim().length >= 4;
-    const durations = [[24,'1 day'],[72,'3 days'],[168,'7 days']];
-    return '<div class="sheet-head"><h3 style="font-size:14px;">Create a poll</h3><button class="btn btn-ghost btn-sm" id="btnCloseSheet" aria-label="Close">&#10005;</button></div>'
-      + '<div class="sheet-body">'
-      + '<p class="hint" style="margin-bottom:10px;">Ask consumers a real Yes/No question. It runs in the live feed like every other topic, and every response adds to the same real‑time sentiment pool &mdash; the data product described in the pitch.</p>'
-      + '<div class="field"><label for="pollTitleInput">Question</label><input id="pollTitleInput" maxlength="120" placeholder="e.g. Will you try our new flavour this month?" value="'+esc(d.title)+'"></div>'
-      + '<div class="field" style="display:flex; gap:8px;"><div style="flex:1; display:flex; flex-direction:column; gap:6px;"><label for="pollYesInput">&ldquo;Yes&rdquo; label</label><input id="pollYesInput" maxlength="24" value="'+esc(d.yes)+'"></div>'
-      + '<div style="flex:1; display:flex; flex-direction:column; gap:6px;"><label for="pollNoInput">&ldquo;No&rdquo; label</label><input id="pollNoInput" maxlength="24" value="'+esc(d.no)+'"></div></div>'
-      + '<div class="field"><label>Runs for</label><div class="chip-row">'
-      + durations.map(([h,l])=>'<button data-poll-hrs="'+h+'" class="'+(d.hrs===h?'active':'')+'">'+l+'</button>').join('')
-      + '</div></div>'
-      + '<button class="btn btn-primary btn-block" id="btnPublishPoll" '+(titleOk?'':'disabled')+' style="margin-top:8px;">Publish to the live feed</button>'
-      + '<p class="hint" style="margin-top:8px;">Lands in the Community Polls category, visible to every player. No points are spent or charged to run it.</p>'
-      + '</div>';
-  }
-  function renderMyPolls(){
-    const mine = (state.customPolls||[]).filter(p=>p.creator===state.user.name);
-    if(!mine.length) return '';
-    const rows = mine.map(p=>{
-      const c = state.contests.find(x=>x.id===p.id);
-      const total = c ? c.pool.yes + c.pool.no : 0;
-      const yesPct = total ? Math.round(c.pool.yes/total*100) : 50;
-      return '<div class="my-poll-row" data-open-contest="'+p.id+'" style="cursor:pointer;"><b>'+esc(p.title)+'</b><span class="hint">'+yesPct+'% &ldquo;'+esc(p.yes)+'&rdquo; &middot; '+fmtNum(total)+' pts reflected'+(c&&c.status==='resolved'?' &middot; resolved':'')+'</span></div>';
-    }).join('');
-    return '<h3 style="font-size:13px; margin:18px 0 8px;">Your polls</h3><div class="card" style="padding:2px 14px; margin-bottom:14px;">'+rows+'</div>';
   }
   function renderSheet(){
     const backdrop = document.getElementById('sheetBackdrop'), sheet = document.getElementById('sheet');
     if(state.notifPanelOpen){
       sheet.innerHTML = renderNotifPanel();
-      backdrop.classList.add('open'); sheet.classList.add('open');
-      return;
-    }
-    if(state.creatingPoll){
-      sheet.innerHTML = renderCreatePollSheet();
       backdrop.classList.add('open'); sheet.classList.add('open');
       return;
     }
@@ -983,12 +1028,11 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       return;
     }
     if(!state.openContest){ backdrop.classList.remove('open'); sheet.classList.remove('open'); sheet.innerHTML=''; return; }
-    const {title, body} = renderContestSheet(state.openContest);
+    const {body} = renderContestSheet(state.openContest);
     sheet.innerHTML = '<div class="sheet-head"><h3 style="font-size:14px; max-width:80%;">Your call</h3><button class="btn btn-ghost btn-sm" id="btnCloseSheet" aria-label="Close">&#10005;</button></div><div class="sheet-body">'+body+'</div>';
     backdrop.classList.add('open'); sheet.classList.add('open');
   }
   function renderPhone(){ renderPhoneBody(); renderPhoneNav(); renderSheet(); renderNotifBadge(); }
-
   /* ============ actions ============ */
   function place(action, payload){
     switch(action){
@@ -1057,10 +1101,9 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
         state.selfieVerified = true;
         state.selfieSkipped = false;
         state._selfiePreviewDataUrl = null;
-        addLedger('kyc', 'Verified badge reward (selfie confirmed)', 100);
         if(state.obStep==='selfie'){ state.obStep = 'interests'; }
         else { state.selfieSheetOpen = false; }
-        render(); toast('You’re Verified — +100 pts'); break;
+        render(); break;
       }
       case 'skipSelfie': {
         state.selfieSkipped = true;
@@ -1073,7 +1116,7 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
         state.selfieSheetOpen = true;
         state._selfieCameraError = false;
         state._selfiePreviewDataUrl = null;
-        state.openContest = null; state.notifPanelOpen = false; state.creatingPoll = false;
+        state.openContest = null; state.notifPanelOpen = false;
         render(); break;
       }
       case 'toggleInterest': {
@@ -1092,7 +1135,6 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       }
       case 'hookPick': {
         if(state._hookChoice) return;
-        if(state._hookContestId){ addLedger('signup','First forecast reward', 30); }
         state._hookChoice = payload;
         render(); break;
       }
@@ -1100,141 +1142,174 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       case 'continueToWelcome': { state.obStep='welcome'; render(); break; }
       case 'enterApp': {
         state.user.signedIn = true;
-        addLedger('signup','Welcome reward', 1000);
-        addLedger('kyc','Verification reward', 150);
+        loadMe(); loadMyCalls();
         state.catFilter = (state.interests && state.interests[0]) || 'all';
         state.phoneScreen='home';
         render(); toast('Welcome to Bharat Foreseez'); break;
       }
-      case 'nav': { state.phoneScreen = payload; state._sheetSel=null; render(); break; }
+      case 'nav': {
+        state.phoneScreen = payload; state._sheetSel=null; render();
+        if(payload==='pulse') loadSentiment();
+        else if(payload==='ledger'){ loadMyCalls(); if(state.ledgerTab==='ledger') loadLedger(false); }
+        else if(payload==='leaderboard') loadLeaderboard(state.lbPeriod);
+        else if(payload==='wallet'){ loadMe(); loadQuiz(); }
+        else if(payload==='profile'){ loadMe(); loadGrievances(); loadBlocks(); }
+        break;
+      }
       case 'filter': { state.catFilter = payload; render(); break; }
       case 'sort': { state.sortMode = payload; render(); break; }
-      case 'openContest': { resetVoiceRecordingState(); state.openContest = payload; state.openCampaign=null; state._sheetSel=null; state._sheetStake=50; state._commentDraft=''; state._commentMedia=null; state._commentConsent=false; state.notifPanelOpen=false; state.creatingPoll=false; state.selfieSheetOpen=false; render(); break; }
-      case 'openCampaign': { state.openCampaign = payload; state.openContest=null; state.notifPanelOpen=false; state.creatingPoll=false; state.selfieSheetOpen=false; render(); break; }
-      case 'closeSheet': { state.openContest=null; state.openCampaign=null; state.notifPanelOpen=false; state.creatingPoll=false; state.selfieSheetOpen=false; render(); break; }
+      case 'openContest': {
+        state.openContest = payload; state._sheetSel=null; state._sheetStake=50; state._commentDraft='';
+        state.replyTo=null; state._reportFor=null; state._disputeOpen=false; state._callKey=null;
+        state.notifPanelOpen=false; state.selfieSheetOpen=false;
+        render(); ensureQuestion(payload); loadThread(payload); break;
+      }
+      case 'closeSheet': { state.openContest=null; state.notifPanelOpen=false; state.selfieSheetOpen=false; render(); break; }
       case 'toggleBell': {
         state.openContest=null;
-        state.creatingPoll=false;
         state.selfieSheetOpen=false;
         state.notifPanelOpen = true;
         state.notifications.forEach(n=>n.read=true);
         render(); break;
       }
-      case 'openCreatePoll': {
-        if(!state.plus){ toast('Subscribe to Foreseez Plus to create a poll'); return; }
-        state._pollDraft = { title:'', yes:'Yes', no:'No', hrs:72 };
-        state.openContest = null; state.notifPanelOpen = false; state.creatingPoll = true; state.selfieSheetOpen = false;
-        render(); break;
-      }
-      case 'pollHrs': {
-        if(!state._pollDraft) return;
-        state._pollDraft.hrs = Number(payload);
-        render(); break;
-      }
-      case 'publishPoll': {
-        if(!state.plus){ toast('Subscribe to Foreseez Plus to create a poll'); return; }
-        const d = state._pollDraft || {};
-        const title = (d.title||'').trim();
-        if(title.length < 4){ toast('Enter a question for your poll'); return; }
-        const yesLabel = (d.yes||'').trim() || 'Yes';
-        const noLabel = (d.no||'').trim() || 'No';
-        const hrs = d.hrs || 72;
-        const id = 'community-'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
-        const seedYes = 8 + Math.floor(Math.random()*12), seedNo = 8 + Math.floor(Math.random()*12);
-        const creatorName = state.user.name || 'A Plus subscriber';
-        const poll = {
-          id, category:'community', title, yes:yesLabel, no:noLabel, closesInHrs:hrs, creator:creatorName,
-          desc:'A community poll from '+creatorName+', a Foreseez Plus subscriber. Same earn‑only mechanics as every other topic — every response feeds straight into the same real‑time sentiment pool.'
-        };
-        poll.closes = new Date(liveNow().getTime() + hrs*3600000);
-        state.customPolls.push(poll);
-        state.contests.push({ id, status:'open', resolvedOption:null, pool:{yes:seedYes, no:seedNo} });
-        state.creatingPoll = false; state._pollDraft = null;
-        pushActivity('<b>You</b> published a new community poll &mdash; &ldquo;'+esc(title)+'&rdquo;');
-        render(); toast('Poll published to the live feed'); break;
-      }
-      case 'likeComment': {
-        const list = state.comments[state.openContest];
-        if(!list) return;
-        const cm = list[Number(payload)];
-        if(!cm) return;
-        if(cm.likedByMe){ cm.likedByMe=false; cm.likes=Math.max(0,(cm.likes||0)-1); }
-        else { cm.likedByMe=true; cm.likes=(cm.likes||0)+1; }
-        render(); break;
-      }
-      case 'reportComment': {
-        const list = state.comments[state.openContest];
-        if(!list) return;
-        const cm = list[Number(payload)];
-        if(!cm || !cm.media || cm.media.reported) return;
-        cm.media.reported = true;
-        render(); toast('Reported — hidden pending moderator review. Thanks for keeping debates safe.'); break;
-      }
-      case 'toggleVoiceRecording': {
-        if(state._voiceRecording) stopVoiceRecording(); else startVoiceRecording();
-        break;
-      }
-      case 'removeCommentMedia': {
-        state._commentMedia = null; state._commentConsent = false; render(); break;
-      }
-      case 'postComment': {
-        const input = document.getElementById('commentInput');
-        const txt = (input?input.value:'').trim();
-        const media = state._commentMedia;
-        if((!txt && !media) || !state.openContest) return;
-        if(media && !state._commentConsent) return;
-        const mine = state.predictions[state.openContest];
-        ensureComments(state.openContest).unshift({ who: state.user.name||'You', txt, hrsAgo:0, side: mine?mine.option:null, likes:0, likedByMe:false, media: media||null });
-        state._commentDraft=''; state._commentMedia=null; state._commentConsent=false;
-        pushActivity('<b>You</b> commented on &ldquo;'+esc(contestDef(state.openContest).title)+'&rdquo;');
-        render(); break;
-      }
-      case 'subscribePlus': {
-        state.plus = true;
-        state.plusTier = 'plus';
-        render(); toast('Foreseez Plus activated (simulated) — no points were spent or credited');
-        break;
-      }
-      case 'subscribePlusPro': {
-        state.plus = true;
-        state.plusTier = 'pro';
-        render(); toast('Foreseez Plus Pro activated (simulated) — no points were spent or credited');
-        break;
-      }
       case 'selectOpt': { state._sheetSel = payload; render(); break; }
       case 'chip': {
-        const bal = balance();
-        state._sheetStake = payload==='max' ? Math.min(bal,500) : Number(payload);
+        state._sheetStake = payload==='max' ? Math.min(balance(), rules().call_max_points) : Number(payload);
         render(); break;
       }
-      case 'placePrediction': {
-        const input = document.getElementById('stakeInput');
-        const amt = Math.round(Number(input.value));
-        const sel = state._sheetSel;
-        if(!sel){ toast('Choose an outcome first'); return; }
-        if(!amt || amt < 10){ toast('Minimum commitment is 10 pts'); return; }
-        if(amt > balance()){ toast('Not enough points'); return; }
-        if(callsLeftToday()<=0){ toast('Daily limit of '+dailyCallCap()+' calls reached'); return; }
-        const id = state.openContest, def = contestDef(id);
-        if(!def || def.status!=='open' || !(def.closes > liveNow())){ toast('This question is no longer open'); return; }
-        addLedger('stake', 'Committed points to “'+def.title+'”', -amt, id);
-        state.predictions[id] = { option:sel, staked:amt };
-        state.callsToday++;
-        render(); toast('Call locked in'); break;
-      }
-      case 'checkin': { addLedger('checkin','Daily check‑in reward', 50); state.checkedIn=true; render(); toast('+50 pts'); break; }
-      case 'reset': {
-        const keep = { questionDefs:state.questionDefs, contests:state.contests, feedStatus:state.feedStatus,
-                       newsFeed:state.newsFeed, newsAttribution:state.newsAttribution, flags:state.flags, grievance:state.grievance };
-        state = Object.assign(defaultState(), keep, SHOW_ONBOARDING ? {} : demoSignedIn());
-        render(); toast('Preview data cleared'); break;
-      }
+      case 'placePrediction': { placeCall(); break; }
+      case 'checkin': { doCheckin(); break; }
       case 'shareRank': {
-        const tier = rankTierFor(balance());
-        toast('Rank card ready to share (simulated) — "'+tier.name+'" on Bharat Foreseez');
+        const tier = rankTierFor(lifetimeEarned());
+        const text = 'I’m '+tier.name+' on Bharat Foreseez with '+fmtNum(lifetimeEarned())+' points earned.';
+        if(navigator.share) navigator.share({ text }).catch(()=>{});
+        else if(navigator.clipboard) navigator.clipboard.writeText(text).then(()=>toast('Copied to share'));
         break;
       }
     }
+  }
+
+  /* ============ server actions ============ */
+  async function placeCall(){
+    const input = document.getElementById('stakeInput');
+    const amt = Math.round(Number(input && input.value));
+    const sel = state._sheetSel, r = rules();
+    const id = state.openContest, def = contestDef(id);
+    if(!sel){ toast('Choose an outcome first'); return; }
+    if(!amt || amt < r.call_min_points || amt > r.call_max_points){ toast('Commit between '+r.call_min_points+' and '+r.call_max_points+' points'); return; }
+    if(amt > balance()){ toast('Not enough points'); return; }
+    if(!def || def.status!=='open' || !(def.closes > liveNow())){ toast('This question is no longer open'); return; }
+    if(busy('call')) return;
+    // One key per attempt at this call: a retry after a network error reuses it, so the
+    // server never commits points twice.
+    state._callKey = state._callKey || newId();
+    busy('call', true); render();
+    try {
+      await api.call(id, sel, amt, state._callKey);
+      state._callKey = null;
+      toast('Call locked in');
+      await Promise.all([loadMe(), loadMyCalls(), refreshOpenQuestion()]);
+      loadFeed();
+    } catch(e){
+      if(e.status && e.status < 500) state._callKey = null;   // a definite refusal: next try is new
+      toast(errText(e));
+      if(e.code==='ALREADY_CALLED' || e.code==='INSUFFICIENT_POINTS') loadMe();
+    } finally { busy('call', false); render(); }
+  }
+  async function doCheckin(){
+    if(busy('checkin')) return;
+    busy('checkin', true); render();
+    try { const r = await api.checkin(); toast(r.reward ? '+'+r.reward+' pts · day '+r.streak : 'Checked in · daily reward limit reached'); await loadMe(); }
+    catch(e){ toast(errText(e)); }
+    finally { busy('checkin', false); render(); }
+  }
+  async function answerQuiz(key){
+    if(busy('quiz') || !state.quiz) return;
+    busy('quiz', true); render();
+    try { state.quiz = await api.answerQuiz(state.quiz.id, key); if(state.quiz.correct) loadMe(); }
+    catch(e){ toast(errText(e)); }
+    finally { busy('quiz', false); render(); }
+  }
+  async function postComment(){
+    const input = document.getElementById('commentInput');
+    const txt = (input ? input.value : '').trim();
+    const qid = state.openContest;
+    if(!txt || !qid || busy('comment')) return;
+    busy('comment', true); render();
+    try {
+      await api.postComment(qid, txt, state.replyTo);
+      state._commentDraft = ''; state.replyTo = null;
+      await loadThread(qid);
+    } catch(e){ toast(errText(e)); }
+    finally { busy('comment', false); render(); }
+  }
+  async function deleteComment(id){
+    if(!confirm('Delete your comment?')) return;
+    try { await api.deleteComment(id); await loadThread(state.openContest); toast('Comment deleted'); }
+    catch(e){ toast(errText(e)); }
+  }
+  async function reportComment(reason){
+    const id = state._reportFor;
+    state._reportFor = null; render();
+    try { await api.reportComment(id, reason); toast('Reported. A moderator will review it.'); }
+    catch(e){ toast(errText(e)); }
+  }
+  async function blockAuthor(id){
+    if(!confirm('Block this person? You won’t see their comments.')) return;
+    try { await api.blockAuthor(id); await loadThread(state.openContest); toast('Blocked'); }
+    catch(e){ toast(errText(e)); }
+  }
+  async function sendDispute(){
+    const reason = (document.getElementById('disputeInput')||{}).value || '';
+    const link = (document.getElementById('disputeLink')||{}).value || '';
+    if(reason.trim().length < 10){ toast('Explain the problem in at least 10 characters'); return; }
+    busy('dispute', true); render();
+    try { await api.dispute(state.openContest, reason.trim(), link.trim()); state._disputeOpen = false; toast('Dispute sent. You’ll see the outcome in Profile.'); }
+    catch(e){ toast(errText(e)); }
+    finally { busy('dispute', false); render(); }
+  }
+  async function saveProfile(patch, okMsg){
+    try { await api.updateMe(patch); state._editingName = false; await loadMe(); if(okMsg) toast(okMsg); }
+    catch(e){ toast(errText(e)); }
+  }
+  async function selfExclude(days){
+    if(!confirm('Take a '+days+'-day break? You won’t be able to make calls or post until it ends, and it can’t be cut short.')) return;
+    try { await api.selfExclude(days); await loadMe(); toast('Your break has started'); }
+    catch(e){ toast(errText(e)); }
+  }
+  async function sendGrievance(){
+    const v = id => (document.getElementById(id)||{}).value || '';
+    const body = { category:v('gCat'), subject:v('gSubject').trim(), description:v('gDesc').trim(),
+                   question_id: state.openContest || null,
+                   support_review_consent: !!(document.getElementById('gConsent')||{}).checked };
+    if(body.subject.length < 5 || body.description.length < 20){ toast('Add a subject and describe the problem (20+ characters)'); return; }
+    busy('grievance', true); render();
+    try { const g = await api.raiseGrievance(body); state._grievanceOpen = false; toast('Complaint '+g.ref+' received'); await loadGrievances(); }
+    catch(e){ toast(errText(e)); }
+    finally { busy('grievance', false); render(); }
+  }
+  async function exportData(){
+    try {
+      const data = await api.exportData();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type:'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = 'bharat-foreseez-my-data.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+    } catch(e){ toast(errText(e)); }
+  }
+  async function deleteAccount(){
+    const typed = prompt('This closes your account and removes your name and details. Your points can’t be recovered. Type DELETE to confirm.');
+    if(typed !== 'DELETE') return;
+    try {
+      await api.deleteAccount();
+      try { localStorage.removeItem('bf-session'); localStorage.removeItem(CALL_STATUS_KEY); } catch(_) {}
+      toast('Your account is closed');
+      setTimeout(()=>location.reload(), 1200);
+    } catch(e){ toast(errText(e)); }
+  }
+  async function unblock(uid){
+    try { await api.unblock(uid); await loadBlocks(); } catch(e){ toast(errText(e)); }
   }
 
   /* ============ event delegation ============ */
@@ -1268,40 +1343,55 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
   initTheme();
 
   document.body.addEventListener('click', function(e){
-    const t = e.target;
+    const t_ = e.target;
     const idHandlers = {
       btnGoogle:()=>place('google'), btnApple:()=>place('apple'), btnSendOtp:()=>place('sendOtp'),
       btnVerifyOtp:()=>place('verifyOtp'), btnResendOtp:()=>place('resendOtp'),
       btnFinishKyc:()=>place('finishKyc'), btnCloseSheet:()=>place('closeSheet'),
       btnContinueInterests:()=>place('continueInterests'), btnSkipHook:()=>place('skipHook'),
       btnContinueToWelcome:()=>place('continueToWelcome'), btnEnterApp:()=>place('enterApp'),
-      btnPlacePrediction:()=>place('placePrediction'), btnCheckin:()=>place('checkin'), btnReset:()=>place('reset'),
-      btnBell:()=>place('toggleBell'), btnTheme:()=>toggleTheme(), btnRetryFeed:()=>{ loadFeed(); loadTicker(); }, btnSubscribePlus:()=>place('subscribePlus'), btnSubscribePlusPro:()=>place('subscribePlusPro'), btnPostComment:()=>place('postComment'),
-      btnOpenCreatePoll:()=>place('openCreatePoll'), btnPublishPoll:()=>place('publishPoll'),
+      btnPlacePrediction:()=>place('placePrediction'), btnCheckin:()=>place('checkin'),
+      btnBell:()=>place('toggleBell'), btnTheme:()=>toggleTheme(),
+      btnRetryFeed:()=>{ loadFeed(); loadTicker(); }, btnRetrySentiment:()=>loadSentiment(),
+      btnRetryLedger:()=>loadLedger(false), btnMoreLedger:()=>loadLedger(true), btnRetryLb:()=>loadLeaderboard(state.lbPeriod),
+      btnRetryMe:()=>loadMe(),
+      btnPostComment:()=>postComment(), btnCancelReply:()=>{ state.replyTo=null; render(); },
+      btnOpenDispute:()=>{ state._disputeOpen=true; render(); }, btnSendDispute:()=>sendDispute(),
       btnShareRank:()=>place('shareRank'),
+      btnEditName:()=>{ state._editingName=true; render(); },
+      btnSaveName:()=>saveProfile({ display_name:(document.getElementById('nameInput')||{}).value || '' }, 'Name updated'),
+      btnOpenGrievance:()=>{ state._grievanceOpen=true; render(); }, btnCancelGrievance:()=>{ state._grievanceOpen=false; render(); },
+      btnSendGrievance:()=>sendGrievance(), btnExportData:()=>exportData(), btnDeleteAccount:()=>deleteAccount(),
+      btnCopyInvite:()=>{ const el=document.getElementById('inviteLink'); if(el && navigator.clipboard) navigator.clipboard.writeText(el.value).then(()=>toast('Invite link copied')); },
       btnCaptureSelfie:()=>place('captureSelfie'), btnRetakeSelfie:()=>place('retakeSelfie'),
-      btnConfirmSelfie:()=>place('confirmSelfie'), btnSkipSelfie:()=>place('skipSelfie'),
-      btnOpenSelfieSheet:()=>place('openSelfieSheet'),
-      btnAttachPhoto:()=>document.getElementById('commentPhotoInput').click(),
-      btnAttachVideo:()=>document.getElementById('commentVideoInput').click(),
-      btnRecordVoice:()=>place('toggleVoiceRecording'),
-      btnRemoveCommentMedia:()=>place('removeCommentMedia')
+      btnConfirmSelfie:()=>place('confirmSelfie'), btnSkipSelfie:()=>place('skipSelfie')
     };
-    const idBtn = t.closest('button[id]');
+    const idBtn = t_.closest('button[id]');
     if(idBtn && idHandlers[idBtn.id]){ idHandlers[idBtn.id](); return; }
-    const navBtn = t.closest('button[data-nav]'); if(navBtn){ place('nav', navBtn.dataset.nav); return; }
-    const filterBtn = t.closest('button[data-filter]'); if(filterBtn){ place('filter', filterBtn.dataset.filter); return; }
-    const sortBtn = t.closest('button[data-sort]'); if(sortBtn){ place('sort', sortBtn.dataset.sort); return; }
-    const cardOpen = t.closest('[data-open-contest]');
+    const data = (sel)=>t_.closest(sel);
+    let el;
+    if((el = data('button[data-nav]'))){ place('nav', el.dataset.nav); return; }
+    if((el = data('button[data-filter]'))){ place('filter', el.dataset.filter); return; }
+    if((el = data('button[data-sort]'))){ place('sort', el.dataset.sort); return; }
+    if((el = data('button[data-ledger-tab]'))){ state.ledgerTab = el.dataset.ledgerTab; render(); if(state.ledgerTab==='ledger') loadLedger(false); return; }
+    if((el = data('button[data-lb]'))){ state.lbPeriod = el.dataset.lb; render(); loadLeaderboard(state.lbPeriod); return; }
+    if((el = data('button[data-quiz]'))){ answerQuiz(el.dataset.quiz); return; }
+    if((el = data('button[data-reply]'))){ state.replyTo = Number(el.dataset.reply); state._reportFor=null; render(); const i=document.getElementById('commentInput'); if(i) i.focus(); return; }
+    if((el = data('button[data-del-comment]'))){ deleteComment(Number(el.dataset.delComment)); return; }
+    if((el = data('button[data-report-comment]'))){ const id=Number(el.dataset.reportComment); state._reportFor = state._reportFor===id ? null : id; render(); return; }
+    if((el = data('button[data-report-reason]'))){ reportComment(el.dataset.reportReason); return; }
+    if((el = data('button[data-block-author]'))){ blockAuthor(Number(el.dataset.blockAuthor)); return; }
+    if((el = data('button[data-reload-thread]'))){ loadThread(el.dataset.reloadThread); return; }
+    if((el = data('button[data-avatar]'))){ saveProfile({ avatar: el.dataset.avatar }); return; }
+    if((el = data('button[data-exclude]'))){ selfExclude(Number(el.dataset.exclude)); return; }
+    if((el = data('button[data-unblock]'))){ unblock(el.dataset.unblock); return; }
+    if((el = data('button[data-lang]'))){ setLang(el.dataset.lang); render(); return; }
+    const cardOpen = data('[data-open-contest]');
     if(cardOpen){ if(cardOpen.tagName==='A') e.preventDefault(); place('openContest', cardOpen.dataset.openContest); return; }
-    const interestBtn = t.closest('button[data-interest]'); if(interestBtn){ place('toggleInterest', interestBtn.dataset.interest); return; }
-    const hookBtn = t.closest('button[data-hook]'); if(hookBtn){ place('hookPick', hookBtn.dataset.hook); return; }
-    const optBtnEl = t.closest('button[data-opt]'); if(optBtnEl && !optBtnEl.disabled){ place('selectOpt', optBtnEl.dataset.opt); return; }
-    const chipBtn = t.closest('button[data-chip]'); if(chipBtn){ place('chip', chipBtn.dataset.chip); return; }
-    const pollHrsBtn = t.closest('button[data-poll-hrs]'); if(pollHrsBtn){ place('pollHrs', pollHrsBtn.dataset.pollHrs); return; }
-    const likeBtn = t.closest('button[data-like-comment]'); if(likeBtn){ place('likeComment', likeBtn.dataset.likeComment); return; }
-    const reportBtn = t.closest('button[data-report-comment]'); if(reportBtn && !reportBtn.disabled){ place('reportComment', reportBtn.dataset.reportComment); return; }
-    if(t.id==='sheetBackdrop') place('closeSheet');
+    if((el = data('button[data-interest]'))){ place('toggleInterest', el.dataset.interest); return; }
+    if((el = data('button[data-hook]'))){ place('hookPick', el.dataset.hook); return; }
+    if((el = data('button[data-opt]')) && !el.disabled){ place('selectOpt', el.dataset.opt); return; }
+    if((el = data('button[data-chip]'))){ place('chip', el.dataset.chip); return; }
   });
   document.getElementById('sheetBackdrop').addEventListener('click', ()=>place('closeSheet'));
   document.body.addEventListener('keydown', function(e){
@@ -1311,37 +1401,59 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     if(e.key==='Enter'){
       if(e.target.id==='phoneInput') place('sendOtp');
       if(e.target.id==='otpInput') place('verifyOtp');
-      if(e.target.id==='commentInput') place('postComment');
+      if(e.target.id==='commentInput') postComment();
+      if(e.target.id==='nameInput') idClick('btnSaveName');
     }
   });
+  function idClick(id){ const b = document.getElementById(id); if(b) b.click(); }
   document.body.addEventListener('input', function(e){
-    const t = e.target;
-    if(t.id==='searchInput'){ state.searchQuery = t.value; render(); }
-    else if(t.id==='stakeInput'){ state._sheetStake = t.value===''? '' : Number(t.value); }
-    else if(t.id==='commentInput'){ state._commentDraft = t.value; }
-    else if(t.id==='fullNameInput'){ state.fullName = t.value; render(); }
-    else if(t.id==='dobInput'){ state.dob = t.value; render(); }
-    else if(t.id==='pollTitleInput'){ state._pollDraft.title = t.value; render(); }
-    else if(t.id==='pollYesInput'){ state._pollDraft.yes = t.value; }
-    else if(t.id==='pollNoInput'){ state._pollDraft.no = t.value; }
+    const el = e.target;
+    if(el.id==='searchInput'){ state.searchQuery = el.value; render(); }
+    else if(el.id==='stakeInput'){ state._sheetStake = el.value===''? '' : Number(el.value); }
+    else if(el.id==='commentInput'){ state._commentDraft = el.value; }
+    else if(el.id==='fullNameInput'){ state.fullName = el.value; render(); }
+    else if(el.id==='dobInput'){ state.dob = el.value; render(); }
   });
   document.body.addEventListener('change', function(e){
-    if(e.target.id==='rawToggle'){ place('toggleRaw', e.target.checked); }
-    else if(e.target.id==='chkAgeDeclare'){ state.ageDeclared = e.target.checked; render(); }
+    if(e.target.id==='chkAgeDeclare'){ state.ageDeclared = e.target.checked; render(); }
     else if(e.target.id==='chkConsent'){ state.consentGiven = e.target.checked; render(); }
-    else if(e.target.id==='chkMediaConsent'){ state._commentConsent = e.target.checked; render(); }
-    else if(e.target.id==='commentPhotoInput'){ handleCommentFile('photo', e.target.files[0]); e.target.value=''; }
-    else if(e.target.id==='commentVideoInput'){ handleCommentFile('video', e.target.files[0]); e.target.value=''; }
+    else if(e.target.id==='regionSelect'){
+      const v = e.target.value;
+      saveProfile(v ? { region:v } : { clear_region:true }, 'State saved');
+    }
   });
 
 
   /* ============ live refresh ============ */
   function refreshIfVisible(){
-    if(document.visibilityState==='visible' && state.user.signedIn && Date.now() - feedLoadedAt >= FEED_MIN_GAP_MS) loadFeed();
+    if(document.visibilityState!=='visible' || !state.user.signedIn) return;
+    if(Date.now() - feedLoadedAt >= FEED_MIN_GAP_MS) loadFeed();
   }
   setInterval(refreshIfVisible, FEED_REFRESH_MS);
   setInterval(function(){ if(document.visibilityState==='visible') loadTicker(); }, TICKER_REFRESH_MS);
+  setInterval(refreshOpenQuestion, SHEET_REFRESH_MS);
+  // Results land while the app is open: check your calls now and then.
+  setInterval(function(){ if(document.visibilityState==='visible' && state.myCalls.some(c=>c.status==='active')) loadMyCalls(); }, 120000);
   document.addEventListener('visibilitychange', refreshIfVisible);
+
+  // Safeguard (spec s.2): a reminder after a stretch of continuous use.
+  let sessionStartedAt = Date.now();
+  setInterval(function(){
+    if(document.visibilityState!=='visible'){ return; }
+    const mins = rules().session_reminder_minutes;
+    if(mins && Date.now() - sessionStartedAt >= mins*60000){
+      sessionStartedAt = Date.now();
+      toast(t('session_reminder'));
+      pushNotification(t('session_reminder'));
+      renderNotifBadge();
+    }
+  }, 60000);
+  document.addEventListener('visibilitychange', function(){
+    // A long absence starts a fresh session.
+    if(document.visibilityState==='visible' && Date.now() - lastHidden > 10*60000) sessionStartedAt = Date.now();
+    if(document.visibilityState==='hidden') lastHidden = Date.now();
+  });
+  let lastHidden = Date.now();
 
   /* ============ boot ============ */
   function withFocusPreserved(fn){
@@ -1371,29 +1483,21 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
   }
   function render(){ withFocusPreserved(function(){ renderPhone(); }); ensureSelfieCamera(); }
 
-  // Onboarding + KYC is fully built but gated off for in-browser testing.
-  // Set SHOW_ONBOARDING to true (e.g. for the packaged APK) to show the
-  // first-run onboarding flow on launch instead of booting into the app.
+  // Onboarding (sign-in, OTP, 18+ and consent) is built but gated off until phone sign-in
+  // ships (M2). Until then the app opens straight into a pseudonymous device account.
+  // Set SHOW_ONBOARDING to true (e.g. for the packaged APK) once sign-in is live.
   const SHOW_ONBOARDING = false;
-  function demoSignedIn(){
-    return {
-      phoneScreen:'home', obStep:'welcome', catFilter:'all',
-      user:{ signedIn:true, name:'Demo Player', method:'phone' },
-      fullName:'Demo Player',
-      phoneVerified:true, ageDeclared:true, consentGiven:true, selfieVerified:true,
-      ledger:[
-        { id:'lg-seed-1', type:'signup', label:'Welcome reward', amount:1000, balanceAfter:1000, contestId:null, ts:timeNow() },
-        { id:'lg-seed-2', type:'kyc', label:'Verification reward', amount:150, balanceAfter:1150, contestId:null, ts:timeNow() }
-      ]
-    };
-  }
-  function start(){
+  async function start(){
     state = defaultState();
-    if(!SHOW_ONBOARDING) Object.assign(state, demoSignedIn());
+    if(!SHOW_ONBOARDING){ state.user = { signedIn:true, name:'', method:'device' }; state.phoneScreen = 'home'; }
     render();
     loadAppConfig();
     loadFeed();
     loadTicker();
+    try { await ensureSession(); }
+    catch(e){ state.meError = e; render(); return; }
+    await loadMe();
+    loadMyCalls();
   }
   start();
 })();

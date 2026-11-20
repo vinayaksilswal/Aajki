@@ -3,14 +3,22 @@
 One deployable backend with internal modules, following spec section 5 of the MVP Technical
 Specification:
 
-| Module | Owns | Status |
-|---|---|---|
-| `forecasts` | questions (`polls`), topics, participation (`votes`) | M1 |
-| `news` | ticker headlines (`news_items`) | M1 |
-| `governance` | admin panel (interim Basic Auth) | M1. Roles, 2FA and the audit log come in M6 |
-| `identity` | users | M1 admin view. Sign-in, OTP, consent and DPDP rights come in M2 |
-| `debate` | comments | M1 admin view. Replies, attachments and moderation come in M4 |
-| `sentiment` | admin mood signal | M1. The public dashboard comes in M5 |
+| Module | Owns |
+|---|---|
+| `identity` | users, app sessions, daily activity; profile, self-exclusion, data export and account deletion |
+| `ledger` | the double-entry points ledger (transactions, entries, balances). The only code that moves points. No payout or transfer path |
+| `forecasts` | topics, questions, calls, settlements, disputes |
+| `debate` | comments and replies, reports, blocks, moderation actions |
+| `engagement` | daily check-in and daily quiz |
+| `standing` | badge catalogue; ranks and leaderboards (read from the ledger) |
+| `compliance` | election quiet periods, grievances |
+| `policy` | admin-set feature switches per state, daily reward cap, rank thresholds |
+| `sentiment` | public sentiment dashboard (aggregates only, minimum group 50); admin mood signal |
+| `news` | ticker headlines |
+| `governance` | admin accounts with two-factor sign-in, roles, audit log, operations reports, the admin panel |
+
+Sign-in with phone OTP, Google/Apple, the 18+ gate and consent records are milestone M2 and are
+not built yet. Until then the app gets a pseudonymous **device account** from `POST /v1/session`.
 
 A module never writes another module's tables. The schema is owned by Alembic migrations, and
 the app never creates or alters tables at startup.
@@ -27,7 +35,8 @@ set DATABASE_URL=sqlite:///local.db        # use a local DB, not the shared one 
 ```
 
 - API: <http://localhost:8000/v1/questions>. OpenAPI docs are at `/docs` in development only.
-- Admin: <http://localhost:8000/admin>. It is open in development when `ADMIN_PASSWORD` is unset.
+- Admin: <http://localhost:8000/admin>. Set `ADMIN_USER` and `ADMIN_PASSWORD` to bootstrap the first
+  Super Admin, then set up two-factor sign-in.
 - The frontend (`npm run dev` in the repo root) reads `VITE_API_BASE=http://localhost:8000`.
 
 ## Tests
@@ -41,16 +50,35 @@ never touch a real database and never reach the network.
 
 ## Public API (v1)
 
+Reads that need no session: `GET /v1/questions`, `/v1/questions/{id}`, `/v1/ticker`, `/v1/sentiment`,
+`/v1/app-config?region=`, `/v1/badges`, `/healthz`.
+
+With `Authorization: Bearer <token>` (from `POST /v1/session`):
+
 | Route | Purpose |
 |---|---|
-| `GET /v1/questions?status=open\|closed\|settled&category=&q=&sort=closing\|trending&cursor=&limit=` | Question feed |
-| `GET /v1/questions/{id}` | Question detail, with the chance per outcome and the resolution source and rule |
-| `GET /v1/ticker` | Context-ticker headlines, with attribution |
-| `GET /v1/app-config` | Feature flags (all Phase 2 flags off), categories, Grievance Officer, legal links |
-| `GET /healthz` | Liveness and database check |
+| `GET /v1/me`, `PATCH /v1/me` | Profile, points, rank, stats, badges, check-in status, restrictions, regional switches |
+| `POST /v1/questions/{id}/calls` | Commit points to an outcome. **`Idempotency-Key` header required**; a retry returns the first call |
+| `GET /v1/me/calls`, `GET /v1/me/ledger` | My calls; the points ledger |
+| `POST /v1/questions/{id}/disputes` | Dispute a settled result inside its window |
+| `GET/POST /v1/questions/{id}/comments`, `DELETE /v1/comments/{id}`, `POST /v1/comments/{id}/report`, `POST /v1/comments/{id}/block-author` | Debate |
+| `POST /v1/me/checkin`, `GET /v1/quiz/today`, `POST /v1/quiz/{id}/answer` | Daily rewards |
+| `GET /v1/leaderboards?period=daily\|weekly\|all` | Leaderboards |
+| `POST /v1/me/self-exclusion` | Take a break (1, 7, 30 or 90 days) |
+| `POST /v1/grievances`, `GET /v1/me/grievances` | Grievance portal |
+| `GET /v1/me/export`, `DELETE /v1/me` | DPDP data copy and erasure |
 
 Every response carries `X-Correlation-ID`, and every error uses the same envelope:
-`{"error": {"code", "message", "correlation_id", "details?"}}`.
+`{"error": {"code", "message", "correlation_id", "details?"}}`. Abuse limits (sign-ups per
+network, calls, comments, reports, admin sign-in) are kept in the database so every instance
+shares them.
+
+## Admin panel
+
+`/admin`. Accounts with argon2 passwords and mandatory TOTP two-factor sign-in, six roles from
+the spec, and an append-only audit log (Postgres triggers reject UPDATE and DELETE on the audit
+log and the ledger). See `../docs/operations.md` for the first sign-in, settlement, moderation,
+quiet periods, the restore drill and the pre-launch checklist.
 
 ## Question lifecycle
 
@@ -66,8 +94,8 @@ An admin drafts a question from a headline, rewrites it as a checkable question,
 
 ## Configuration
 
-See `.env.example`. Staging and production refuse to start without `DATABASE_URL`,
-`ADMIN_PASSWORD` and an explicit `ALLOWED_ORIGINS` list.
+See `.env.example`. Staging and production refuse to start without `DATABASE_URL` and an
+explicit `ALLOWED_ORIGINS` list.
 
 ## Deploy (Vercel, separate project, root `backend-python`)
 

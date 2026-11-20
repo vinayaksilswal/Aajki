@@ -94,3 +94,41 @@ def set_hidden(s: Session, item_id: str, hidden: bool) -> None:
     if not item:
         raise not_found("Headline")
     item.hidden = hidden
+
+
+def add_manual(s: Session, title: str, source: str, link: str, category: str) -> NewsItem:
+    """An editor-added headline from an approved source (SOW 3.2.11)."""
+    from app.errors import AppError
+    from app.modules.forecasts.models import CATEGORIES
+    from urllib.parse import urlparse
+    title, source, link = (title or "").strip(), (source or "").strip(), (link or "").strip()
+    problems = {}
+    if not 10 <= len(title) <= 300:
+        problems["title"] = "10 to 300 characters."
+    if not 2 <= len(source) <= 200:
+        problems["source"] = "Name the publisher."
+    if urlparse(link).scheme != "https" or not urlparse(link).netloc:
+        problems["link"] = "Use the article's https:// link."
+    if category not in CATEGORIES:
+        problems["category"] = "Choose a category."
+    if problems:
+        raise AppError(422, "VALIDATION_FAILED", "Fix the highlighted fields.", problems)
+    h = _hash(link)
+    if s.scalar(select(NewsItem.id).where(NewsItem.link_hash == h)):
+        raise AppError(409, "CONFLICT", "That headline is already in the ticker.")
+    now = datetime.now(timezone.utc)
+    item = NewsItem(id=new_id("news"), category=category, title=title, source=source, link=link,
+                    link_hash=h, published_at=now, fetched_at=now)
+    s.add(item)
+    s.flush()
+    return item
+
+
+def link_question(s: Session, item_id: str, question_id: str | None) -> NewsItem:
+    item = s.get(NewsItem, item_id)
+    if not item:
+        raise not_found("Headline")
+    if question_id:
+        forecasts.get(s, question_id)
+    item.question_id = question_id or None
+    return item

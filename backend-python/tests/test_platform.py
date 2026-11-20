@@ -34,7 +34,9 @@ def test_health_reports_status_without_leaking_counts(client):
 
 def test_app_config_keeps_phase_two_features_off(client):
     cfg = client.get("/v1/app-config").json()
-    assert cfg["flags"] and not any(cfg["flags"].values())
+    for flag in ("prizes", "plus", "sponsored_polls", "user_created_polls", "spin_the_wheel"):
+        assert cfg["flags"][flag] is False
+    assert cfg["flags"]["forecasting"] is True and cfg["rules"]["daily_call_cap"] == 10
     assert [c["key"] for c in cfg["categories"]] == ["elections", "markets", "sports", "policy",
                                                      "world", "community"]
     assert set(cfg["grievance_officer"]) == {"name", "email", "phone", "address"}
@@ -46,7 +48,7 @@ def test_openapi_docs_are_dev_only(client, settings):
 
 @pytest.mark.parametrize("env,expected", [
     ({"app_env": "production", "database_url": "", "admin_password": "", "allowed_origins": ""},
-     "DATABASE_URL, ADMIN_PASSWORD, ALLOWED_ORIGINS"),
+     "DATABASE_URL, ALLOWED_ORIGINS"),
     ({"app_env": "staging", "database_url": "postgresql://x", "admin_password": "p",
       "allowed_origins": "*"}, "explicit origins"),
 ])
@@ -59,7 +61,7 @@ def test_unset_app_env_fails_closed_as_production(monkeypatch):
     monkeypatch.delenv("APP_ENV", raising=False)
     st = Settings(_env_file=None, database_url="", admin_password="", allowed_origins="")
     assert st.app_env == "production" and not st.is_dev
-    with pytest.raises(RuntimeError, match="ADMIN_PASSWORD"):
+    with pytest.raises(RuntimeError, match="DATABASE_URL"):
         st.check()
 
 

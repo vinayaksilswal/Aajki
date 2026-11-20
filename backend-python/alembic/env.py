@@ -14,7 +14,7 @@ target_metadata = Base.metadata
 
 # Prototype tables kept in the database (not dropped without a deliberate decision) but no
 # longer mapped by the app. Excluded from autogenerate so `alembic check` stays a clean gate.
-RETAINED_UNMAPPED = {"stories", "boards", "settings"}
+RETAINED_UNMAPPED = {"stories", "boards", "settings", "votes"}
 
 
 def include_object(obj, name, type_, reflected, compare_to):

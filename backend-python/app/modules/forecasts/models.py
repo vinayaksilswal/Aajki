@@ -1,13 +1,15 @@
-"""Forecasts module tables: topics, questions and (pre-ledger) participation records.
+"""Forecasts module tables: topics, questions, calls, settlements and disputes.
 
-Table names are kept from the prototype ("polls", "votes") so live data migrates in place;
-the Python and API vocabulary follows the spec (question, outcome, call).
+The questions table keeps its prototype name ("polls") so live data migrates in place; the
+Python and API vocabulary follows the spec (question, outcome, call). Points move only
+through the ledger module; a call records which ledger transaction committed its points.
 """
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import (Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text,
+                        UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -60,6 +62,9 @@ class Question(Base):
     resolution_source_url: Mapped[str | None] = mapped_column(Text)
     resolution_rule: Mapped[str | None] = mapped_column(Text)
     election_sensitive: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Indian state (or "national") an election-sensitive question is about; quiet periods
+    # for that state withhold its live chance (spec s.6, SOW 4.3.2).
+    election_state: Mapped[str | None] = mapped_column(String(40))
     # When drafted from a ticker headline: the context it came from.
     source_headline: Mapped[str | None] = mapped_column(Text)
     source_link: Mapped[str | None] = mapped_column(Text)
@@ -68,14 +73,68 @@ class Question(Base):
                                                         onupdate=utcnow)
 
 
-class Vote(Base):
-    """Prototype participation record (one row per reaction). Calls with committed points
-    and the double-entry ledger replace this in M3; until then it feeds the consensus."""
-    __tablename__ = "votes"
+class Call(Base):
+    """One user's call on one question: the outcome they chose and the points committed."""
+    __tablename__ = "calls"
+    __table_args__ = (UniqueConstraint("question_id", "user_id", name="uq_calls_question_user"),
+                      Index("ix_calls_user_created", "user_id", "created_at"))
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    question_id: Mapped[str] = mapped_column("poll_id", ForeignKey("polls.id", ondelete="CASCADE"),
-                                             index=True)
-    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), index=True)
-    outcome_key: Mapped[str] = mapped_column("option_key", String(40))
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    question_id: Mapped[str] = mapped_column(ForeignKey("polls.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    outcome_key: Mapped[str] = mapped_column(String(40))
+    points: Mapped[int] = mapped_column(Integer)
+    # active -> correct | incorrect | refunded
+    status: Mapped[str] = mapped_column(String(12), default="active")
+    # Points released back to the user at settlement (correct calls and refunds).
+    released: Mapped[int | None] = mapped_column(Integer)
+    commit_txn_id: Mapped[str] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Settlement(Base):
+    """A proposed result and its two-person decision (spec s.3, s.6).
+
+    proposed -> approved | rejected; an approved result can later be superseded by a
+    corrected one (status "superseded"), which reverses its ledger entries.
+    """
+    __tablename__ = "settlements"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    question_id: Mapped[str] = mapped_column(ForeignKey("polls.id"), index=True)
+    # An outcome key, or "void" for a cancelled or abandoned event.
+    result: Mapped[str] = mapped_column(String(40))
+    source_url: Mapped[str | None] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(12), default="proposed")
+    # Set when this proposal corrects an earlier approved result.
+    corrects_id: Mapped[str | None] = mapped_column(String(40))
+    proposed_by: Mapped[str] = mapped_column(String(40))
+    proposed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    decided_by: Mapped[str | None] = mapped_column(String(40))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_note: Mapped[str | None] = mapped_column(Text)
+    # What was applied: the outcome, or "void" (also when the rules forced a void).
+    applied_result: Mapped[str | None] = mapped_column(String(40))
+    applied_reason: Mapped[str | None] = mapped_column(Text)
+    dispute_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Dispute(Base):
+    """A user's challenge to an approved result, raised inside the dispute window."""
+    __tablename__ = "settlement_disputes"
+    __table_args__ = (UniqueConstraint("settlement_id", "user_id", name="uq_disputes_settlement_user"),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    settlement_id: Mapped[str] = mapped_column(ForeignKey("settlements.id"), index=True)
+    question_id: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(String(40))
+    reason: Mapped[str] = mapped_column(Text)
+    evidence_url: Mapped[str | None] = mapped_column(Text)
+    # open -> upheld | dismissed
+    status: Mapped[str] = mapped_column(String(12), default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    decided_by: Mapped[str | None] = mapped_column(String(40))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_note: Mapped[str | None] = mapped_column(Text)

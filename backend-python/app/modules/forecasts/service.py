@@ -22,12 +22,11 @@ from urllib.parse import urlparse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.clock import IST, aware, iso, now_utc  # noqa: F401  (re-exported for callers)
 from app.errors import AppError, not_found
 from app.ids import new_id
-from app.modules.forecasts.models import CATEGORIES, Question, Topic, Vote
+from app.modules.forecasts.models import CATEGORIES, Call, Question, Topic
 
-IST = timezone(timedelta(hours=5, minutes=30), "IST")
 MAX_PAGE = 50
 MIN_LEAD = timedelta(minutes=5)          # a question must stay open at least this long
 LOCKED_AFTER_PUBLISH = ("title", "category", "outcomes", "opens_at", "closes_at",
@@ -35,22 +34,6 @@ LOCKED_AFTER_PUBLISH = ("title", "category", "outcomes", "opens_at", "closes_at"
 # Spec s.1/s.7 vocabulary rule: these never appear in product copy.
 _FORBIDDEN = re.compile(r"\b(odds|bet|bets|betting|wager\w*|stake|stakes|staked|payouts?|"
                         r"portfolio|gambl\w*|jackpot)\b", re.IGNORECASE)
-
-
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def aware(dt: datetime | None) -> datetime | None:
-    """SQLite hands back naive datetimes for tz-aware columns; treat them as UTC."""
-    if dt is None:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def iso(dt: datetime | None) -> str | None:
-    dt = aware(dt)
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if dt else None
 
 
 def effective_status(q: Question, now: datetime | None = None) -> str:
@@ -168,7 +151,7 @@ def create_draft(s: Session, d: dict) -> Question:
 
 _EDITABLE = ("title", "category", "outcomes", "description", "image_url", "topic_id",
              "opens_at", "closes_at", "resolution_source_url", "resolution_rule",
-             "election_sensitive", "trending", "source_headline", "source_link")
+             "election_sensitive", "election_state", "trending", "source_headline", "source_link")
 
 
 def update(s: Session, q: Question, d: dict) -> Question:
@@ -225,6 +208,10 @@ def transition(s: Session, q: Question, action: str, now: datetime | None = None
     if action == "resume" and q.closes_at and now >= aware(q.closes_at):
         raise AppError(409, "CONFLICT", "This question has passed its closing time.")
     q.status = target
+    if action == "void":
+        # A void returns every committed point automatically (spec s.3).
+        from app.modules.forecasts import participation
+        participation.refund_all(s, q, "Question cancelled: points returned")
     return q
 
 
@@ -237,21 +224,29 @@ def delete_draft(s: Session, q: Question) -> None:
 
 # ----------------------------------------------------------------------------- reads
 
-def participation(s: Session, ids: list[str]) -> dict[str, dict[str, int]]:
-    """Calls per outcome for each question, one grouped query."""
-    out: dict[str, dict[str, int]] = defaultdict(dict)
+def participation(s: Session, ids: list[str], before: datetime | None = None
+                  ) -> dict[str, dict[str, dict[str, int]]]:
+    """Per question and outcome: calls and points committed (one grouped query).
+    `before` gives the picture as it stood at an earlier moment (consensus trends)."""
+    out: dict[str, dict[str, dict[str, int]]] = defaultdict(dict)
     if ids:
-        rows = s.execute(select(Vote.question_id, Vote.outcome_key, func.count())
-                         .where(Vote.question_id.in_(ids))
-                         .group_by(Vote.question_id, Vote.outcome_key)).all()
-        for qid, key, n in rows:
-            out[qid][key] = n
+        stmt = (select(Call.question_id, Call.outcome_key, func.count(), func.sum(Call.points))
+                .where(Call.question_id.in_(ids)).group_by(Call.question_id, Call.outcome_key))
+        if before is not None:
+            stmt = stmt.where(Call.created_at < before)
+        for qid, key, n, pts in s.execute(stmt).all():
+            out[qid][key] = {"calls": int(n), "points": int(pts or 0)}
     return out
 
 
+def chance(counts: dict[str, dict[str, int]], key: str) -> float | None:
+    """Spec s.2: the consensus chance is each outcome's share of the points committed."""
+    total = sum(v["points"] for v in counts.values())
+    return round(counts.get(key, {}).get("points", 0) / total, 4) if total else None
+
+
 def calls_by_user(s: Session) -> dict[str, int]:
-    return dict(s.execute(select(Vote.user_id, func.count()).where(Vote.user_id.is_not(None))
-                          .group_by(Vote.user_id)).all())
+    return dict(s.execute(select(Call.user_id, func.count()).group_by(Call.user_id)).all())
 
 
 def counts(s: Session, now: datetime | None = None) -> dict[str, int]:
@@ -261,29 +256,37 @@ def counts(s: Session, now: datetime | None = None) -> dict[str, int]:
                       .where(Question.status == "draft")) or 0
     open_ = s.scalar(select(func.count()).select_from(Question).where(
         Question.status == "published", Question.opens_at <= now, Question.closes_at > now)) or 0
-    calls = s.scalar(select(func.count()).select_from(Vote)) or 0
-    return {"questions": total, "open": open_, "drafts": drafts, "calls": calls}
+    calls = s.scalar(select(func.count()).select_from(Call)) or 0
+    awaiting = s.scalar(select(func.count()).select_from(Question).where(
+        Question.status.in_(("published", "paused")), Question.closes_at <= now)) or 0
+    return {"questions": total, "open": open_, "drafts": drafts, "calls": calls,
+            "awaiting_result": awaiting}
 
 
-def chance_hidden(q: Question) -> bool:
-    return bool(q.election_sensitive and get_settings().election_quiet_period)
+def chance_hidden(q: Question, quiet: set[str]) -> bool:
+    """Election-sensitive questions hide their live chance while a quiet period covers their
+    state. "*" means every state; a question with no state is hidden by any quiet period."""
+    if not q.election_sensitive or not quiet:
+        return False
+    return "*" in quiet or not q.election_state or q.election_state in quiet
 
 
-def to_public(q: Question, counts: dict[str, int], now: datetime | None = None) -> dict:
-    hidden = chance_hidden(q)
-    keys = [o["key"] for o in q.outcomes or []]
-    total = sum(counts.get(k, 0) for k in keys)
+def to_public(q: Question, counts: dict[str, dict[str, int]], quiet: set[str],
+              now: datetime | None = None) -> dict:
+    hidden = chance_hidden(q, quiet)
+    total_calls = sum(v["calls"] for v in counts.values())
     outcomes = [{"key": o["key"], "label": o["label"],
-                 "chance": None if hidden or not total else round(counts.get(o["key"], 0) / total, 4)}
+                 "chance": None if hidden else chance(counts, o["key"])}
                 for o in q.outcomes or []]
     return {
         "id": q.id, "category": q.category, "title": q.title,
         "description": q.description, "image_url": q.image_url,
         "status": effective_status(q, now),
         "opens_at": iso(q.opens_at), "closes_at": iso(q.closes_at),
-        "outcomes": outcomes, "participants": total, "chance_hidden": hidden,
+        "outcomes": outcomes, "participants": total_calls, "chance_hidden": hidden,
         "resolution": {"source_url": q.resolution_source_url, "rule": q.resolution_rule},
-        "election_sensitive": bool(q.election_sensitive), "trending": bool(q.trending),
+        "election_sensitive": bool(q.election_sensitive), "election_state": q.election_state,
+        "trending": bool(q.trending),
         "context": ({"headline": q.source_headline, "link": q.source_link}
                     if q.source_headline else None),
     }
@@ -307,7 +310,7 @@ def _encode_cursor(offset: int) -> str:
 
 def list_public(s: Session, *, status: str = "open", category: str | None = None,
                 search: str | None = None, sort: str = "closing", cursor: str | None = None,
-                limit: int = 20, now: datetime | None = None) -> dict:
+                limit: int = 20, quiet: set[str] | None = None, now: datetime | None = None) -> dict:
     now = now or now_utc()
     if category and category not in CATEGORIES:
         raise AppError(400, "BAD_REQUEST", "Unknown category.")
@@ -318,7 +321,7 @@ def list_public(s: Session, *, status: str = "open", category: str | None = None
     elif status == "closed":
         stmt = stmt.where(Question.status == "published", Question.closes_at <= now)
     elif status == "settled":
-        stmt = stmt.where(Question.status == "settled")
+        stmt = stmt.where(Question.status.in_(("settled", "voided")))
     else:
         raise AppError(400, "BAD_REQUEST", "status must be open, closed or settled.")
     if category:
@@ -327,13 +330,15 @@ def list_public(s: Session, *, status: str = "open", category: str | None = None
         term = search.strip()[:80].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         stmt = stmt.where(Question.title.ilike(f"%{term}%", escape="\\"))
     if sort == "trending":
-        calls = (select(Vote.question_id.label("qid"), func.count().label("n"))
-                 .group_by(Vote.question_id).subquery())
+        calls = (select(Call.question_id.label("qid"), func.count().label("n"))
+                 .group_by(Call.question_id).subquery())
         stmt = (stmt.outerjoin(calls, calls.c.qid == Question.id)
                 .order_by(func.coalesce(calls.c.n, 0).desc(), Question.trending.desc(),
                           Question.closes_at.asc(), Question.id))
     elif sort == "closing":
-        stmt = stmt.order_by(Question.closes_at.asc(), Question.id)
+        # Open: closing soonest first. Closed or settled: most recent first.
+        stmt = stmt.order_by(Question.closes_at.asc() if status == "open" else Question.closes_at.desc(),
+                             Question.id)
     else:
         raise AppError(400, "BAD_REQUEST", "sort must be closing or trending.")
     limit = max(1, min(limit, MAX_PAGE))
@@ -341,16 +346,17 @@ def list_public(s: Session, *, status: str = "open", category: str | None = None
     rows = s.scalars(stmt.offset(offset).limit(limit + 1)).all()
     page, more = rows[:limit], len(rows) > limit
     counts = participation(s, [q.id for q in page])
-    return {"items": [to_public(q, counts.get(q.id, {}), now) for q in page],
+    return {"items": [to_public(q, counts.get(q.id, {}), quiet or set(), now) for q in page],
             "next_cursor": _encode_cursor(offset + limit) if more else None,
             "as_of": iso(now)}
 
 
-def get_public(s: Session, qid: str, now: datetime | None = None) -> dict:
+def get_public(s: Session, qid: str, quiet: set[str] | None = None,
+               now: datetime | None = None) -> dict:
     q = s.get(Question, qid)
     if not q or not is_public(q, now):
         raise not_found("Question")
-    return to_public(q, participation(s, [q.id]).get(q.id, {}), now)
+    return to_public(q, participation(s, [q.id]).get(q.id, {}), quiet or set(), now)
 
 
 def open_question_ids(s: Session, ids: list[str], now: datetime | None = None) -> set[str]:
@@ -371,7 +377,7 @@ def admin_rows(s: Session) -> list[dict]:
     now = now_utc()
     return [{"id": q.id, "title": q.title, "category": q.category,
              "status": effective_status(q, now), "closes_at": aware(q.closes_at),
-             "participants": sum(counts.get(q.id, {}).values()),
+             "participants": sum(v["calls"] for v in counts.get(q.id, {}).values()),
              "election_sensitive": q.election_sensitive} for q in qs]
 
 
