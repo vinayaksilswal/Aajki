@@ -78,7 +78,7 @@ def _clean(monkeypatch):
     monkeypatch.setattr(ingest.urllib.request, "urlopen", _no_network)
 
     st = get_settings()
-    for key in ("admin_password", "admin_user", "cron_secret", "election_quiet_period", "app_env",
+    for key in ("admin_password", "admin_user", "admin_require_2fa", "cron_secret", "election_quiet_period", "app_env",
                 "daily_call_cap", "dispute_window_hours"):
         monkeypatch.setattr(st, key, getattr(st, key))  # restored after each test
     yield

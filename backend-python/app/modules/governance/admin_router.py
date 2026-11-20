@@ -109,7 +109,12 @@ async def login(request: Request):
         with session_scope() as s:
             admin = auth.authenticate_password(s, form.get("email", ""), form.get("password", ""), ip)
             token = auth.start_session(s, admin, ip)
-            target = "/admin/2fa" if admin.totp_enabled else "/admin/2fa/setup"
+            if auth.two_factor_required():
+                target = "/admin/2fa" if admin.totp_enabled else "/admin/2fa/setup"
+            else:
+                target = "/admin/dashboard"
+                admin.last_login_at = now_utc()
+                audit(s, None, "admin.sign_in", "admin", admin.id, None, None, ip=ip, actor=admin)
     except AppError as exc:
         with SessionLocal() as s:
             return HTMLResponse(views.page_login(exc.message, auth.admin_count(s) == 0), status_code=exc.status)
@@ -119,7 +124,9 @@ async def login(request: Request):
 
 
 def _pending(request: Request):
-    """The signed-in but not yet two-factor-verified session."""
+    """The signed-in but not yet two-factor-verified session (None when 2FA is off)."""
+    if not auth.two_factor_required():
+        return None
     with SessionLocal() as s:
         found = auth.session_for(s, request.cookies.get(auth.COOKIE))
         if found:
@@ -136,6 +143,8 @@ def _qr(uri: str) -> str:
 
 @router.get("/admin/2fa/setup", response_class=HTMLResponse)
 def totp_setup_page(request: Request):
+    if not auth.two_factor_required():
+        return RedirectResponse("/admin/dashboard", status_code=303)
     found = _pending(request)
     if not found:
         return RedirectResponse("/admin/login", status_code=303)
@@ -153,6 +162,8 @@ def totp_setup_page(request: Request):
 
 @router.post("/admin/2fa/setup", response_class=HTMLResponse)
 async def totp_setup(request: Request):
+    if not auth.two_factor_required():
+        return RedirectResponse("/admin/dashboard", status_code=303)
     found = _pending(request)
     if not found or not auth._same_origin(request):
         return RedirectResponse("/admin/login", status_code=303)
@@ -178,6 +189,8 @@ async def totp_setup(request: Request):
 
 @router.get("/admin/2fa", response_class=HTMLResponse)
 def totp_page(request: Request):
+    if not auth.two_factor_required():
+        return RedirectResponse("/admin/dashboard", status_code=303)
     found = _pending(request)
     if not found:
         return RedirectResponse("/admin/login", status_code=303)
@@ -188,6 +201,8 @@ def totp_page(request: Request):
 
 @router.post("/admin/2fa", response_class=HTMLResponse)
 async def totp_verify(request: Request):
+    if not auth.two_factor_required():
+        return RedirectResponse("/admin/dashboard", status_code=303)
     found = _pending(request)
     if not found or not auth._same_origin(request):
         return RedirectResponse("/admin/login", status_code=303)

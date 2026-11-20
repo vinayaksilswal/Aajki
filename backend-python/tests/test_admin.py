@@ -39,6 +39,7 @@ def test_every_admin_page_requires_sign_in(client):
 
 
 def test_bootstrap_creates_the_first_super_admin_then_requires_2fa(client, settings):
+    settings.admin_require_2fa = True
     settings.admin_user, settings.admin_password = "owner@example.in", "Bootstrap-Pass-2026"
     r = client.post("/admin/login", data={"email": "owner@example.in", "password": "wrong"}, **POST)
     assert r.status_code == 401
@@ -60,6 +61,18 @@ def test_bootstrap_creates_the_first_super_admin_then_requires_2fa(client, setti
         assert {"admin.bootstrap", "admin.2fa_enrolled"} <= actions
 
 
+def test_without_2fa_username_and_password_sign_in_directly(client, settings):
+    settings.admin_user, settings.admin_password = "owner", "Bootstrap-Pass-2026"
+    r = client.post("/admin/login", data={"email": "owner", "password": "Bootstrap-Pass-2026"}, **POST)
+    assert r.status_code == 303 and r.headers["location"] == "/admin/dashboard"
+    assert client.get("/admin/dashboard").status_code == 200
+    assert client.get("/admin/2fa/setup", follow_redirects=False).headers["location"] == "/admin/dashboard"
+    client.post("/admin/logout", **POST)
+    assert client.get("/admin/dashboard", follow_redirects=False).headers["location"] == "/admin/login"
+    r = client.post("/admin/login", data={"email": "owner", "password": "wrong"}, **POST)
+    assert r.status_code == 401
+
+
 def test_bootstrap_login_stops_working_once_an_admin_exists(client, settings):
     make_admin(["super_admin"])
     settings.admin_user, settings.admin_password = "owner@example.in", "Bootstrap-Pass-2026"
@@ -67,7 +80,8 @@ def test_bootstrap_login_stops_working_once_an_admin_exists(client, settings):
     assert r.status_code == 401
 
 
-def test_password_then_totp_code_signs_in_and_a_code_cannot_be_replayed(client):
+def test_password_then_totp_code_signs_in_and_a_code_cannot_be_replayed(client, settings):
+    settings.admin_require_2fa = True
     a = make_admin(["moderator"], email="mod@example.in")
     r = client.post("/admin/login", data={"email": "mod@example.in", "password": "Str0ngPassword!"}, **POST)
     assert r.headers["location"] == "/admin/2fa"

@@ -1,7 +1,8 @@
 """Admin accounts, two-factor sign-in, roles and the audit log (spec s.3; SOW 3.1, 3.8).
 
-Sign-in: email (or the bootstrap login) and password, then a TOTP code from an authenticator
-app. An admin who hasn't enrolled yet must enrol before reaching anything else.
+Sign-in: username/email and password. With ADMIN_REQUIRE_2FA=true (required by the spec
+before launch) a TOTP code from an authenticator app is also needed, and an admin who hasn't
+enrolled must enrol before reaching anything else.
 
 Bootstrap: while no admin account exists, signing in with ADMIN_USER / ADMIN_PASSWORD from
 the environment creates the first Super Admin. After that those values sign nobody in.
@@ -116,7 +117,7 @@ def authenticate_password(s: Session, login: str, password: str, ip: str) -> Adm
     """Check the first factor. Raises a generic error so the reason isn't revealed."""
     st = get_settings()
     login = (login or "").strip().lower()[:160]
-    fail = AppError(401, "UNAUTHORIZED", "Wrong email or password.")
+    fail = AppError(401, "UNAUTHORIZED", "Wrong username or password.")
     if admin_count(s) == 0:
         if (st.admin_password and hmac.compare_digest(login.encode(), st.admin_user.strip().lower().encode())
                 and hmac.compare_digest(password.encode(), st.admin_password.encode())):
@@ -158,11 +159,16 @@ def _record_failure(admin_id: str, ip: str) -> None:
             audit(s, None, "admin.locked", "admin", admin.id, None, None, ip=ip, actor=admin)
 
 
+def two_factor_required() -> bool:
+    return get_settings().admin_require_2fa
+
+
 def start_session(s: Session, admin: AdminUser, ip: str) -> str:
+    """A cookie session. Without two-factor sign-in it is complete at once."""
     token = secrets.token_urlsafe(32)
     now = now_utc()
     s.add(AdminSession(id=new_id("ases"), admin_id=admin.id, token_hash=_hash_token(token),
-                       verified=False, ip=ip, created_at=now,
+                       verified=not two_factor_required(), ip=ip, created_at=now,
                        expires_at=now + timedelta(hours=get_settings().admin_session_hours)))
     return token
 
@@ -238,10 +244,11 @@ def admin_context(request: Request) -> AdminContext:
         if not found:
             raise _redirect("/admin/login")
         sess, admin = found
-        if not admin.totp_enabled:
-            raise _redirect("/admin/2fa/setup")
-        if not sess.verified:
-            raise _redirect("/admin/2fa")
+        if two_factor_required():
+            if not admin.totp_enabled:
+                raise _redirect("/admin/2fa/setup")
+            if not sess.verified:
+                raise _redirect("/admin/2fa")
         if admin.must_change_password and request.url.path not in ("/admin/password", "/admin/logout"):
             raise _redirect("/admin/password")
         s.expunge(admin)

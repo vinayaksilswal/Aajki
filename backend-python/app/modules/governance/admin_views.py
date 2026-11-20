@@ -167,7 +167,7 @@ def page_login(flash: str = "", bootstrap: bool = False) -> str:
     hint = ('<div class="banner">No admin accounts exist yet. Sign in with the bootstrap login '
             '(ADMIN_USER / ADMIN_PASSWORD) to create the first Super Admin.</div>') if bootstrap else ""
     return plain("Sign in", f"""<h1>Sign in</h1>{hint}<form method="post" action="/admin/login">
-<label for="l_email">Email</label><input id="l_email" name="email" autocomplete="username" required>
+<label for="l_email">Username</label><input id="l_email" name="email" autocomplete="username" required>
 <label for="l_pw">Password</label><input id="l_pw" type="password" name="password" autocomplete="current-password" required>
 <div style="margin-top:16px"><button class="btn">Continue</button></div></form>""", flash)
 
@@ -788,28 +788,31 @@ def page_sentiment(ctx, m: dict, public: dict) -> str:
 # ------------------------------------------------------------------ admins / audit
 
 def page_admins(ctx, admins: list, roles: dict, errors: dict, values: dict, flash: str = "") -> str:
+    from app.modules.governance.auth import two_factor_required
+    two_fa = two_factor_required()
     trs = []
     for a in admins:
         role_boxes = "".join(f'<label class="check" style="margin:2px 0"><input type="checkbox" name="roles" value="{esc(k)}"'
                              f'{" checked" if k in (a.roles or []) else ""}> {esc(v)}</label>' for k, v in roles.items())
         trs.append(f'<tr><td><b>{esc(a.name)}</b><div class="muted">{esc(a.email)}</div>'
-                   f'<div class="muted" style="font-size:.72rem">2FA {"on" if a.totp_enabled else "not set up"} · last sign-in {ist(a.last_login_at)}'
+                   f'<div class="muted" style="font-size:.72rem">{("2FA " + ("on" if a.totp_enabled else "not set up") + " · ") if two_fa else ""}last sign-in {ist(a.last_login_at)}'
                    f'{"" if a.active else " · <span class=" + chr(34) + "pill bad" + chr(34) + ">disabled</span>"}</div></td>'
                    f'<td><form method="post" action="/admin/admins/{esc(a.id)}">{role_boxes}'
                    f'<label class="check"><input type="checkbox" name="active" value="1"{" checked" if a.active else ""}> Active</label>'
                    f'<button class="btn sm" style="margin-top:6px">Save</button></form></td>'
-                   f'<td><div class="actions">{post_button(f"/admin/admins/{a.id}/reset-2fa", "Reset 2FA", "ghost", None, "Reset two-factor sign-in? They must enrol again.")}'
+                   f'<td><div class="actions">{post_button(f"/admin/admins/{a.id}/reset-2fa", "Reset 2FA", "ghost", None, "Reset two-factor sign-in? They must enrol again.") if two_fa else ""}'
                    f'</div></td></tr>')
     role_boxes = "".join(f'<label class="check" style="margin:2px 0"><input type="checkbox" name="roles" value="{esc(k)}"'
                          f'{" checked" if k in values.get("roles", []) else ""}> {esc(v)}</label>' for k, v in roles.items())
-    body = (f'<h1>Admin accounts</h1><div class="sub">Every admin signs in with a password and two-factor code. '
+    signin = "a password and a two-factor code" if two_fa else "a username and password (two-factor sign-in is off: turn it on with ADMIN_REQUIRE_2FA before launch)"
+    body = (f'<h1>Admin accounts</h1><div class="sub">Every admin signs in with {signin}. '
             f'Nobody can hold both settlement roles; at least one active Super Admin is always kept.</div>'
             f'<div class="card">{table(["Admin", "Roles", ""], trs)}</div>'
             f'<div class="card"><h2>Add an admin</h2><form method="post" action="/admin/admins"><div class="row">'
             f'<div><label>Name</label><input name="name" maxlength="80" value="{esc(values.get("name", ""))}" required></div>'
             f'<div><label>Work email</label><input name="email" maxlength="160" value="{esc(values.get("email", ""))}" required>{err(errors, "email")}</div></div>'
             f'<label>Temporary password</label><input type="password" name="password" autocomplete="new-password" required>'
-            f'<div class="hint">Share it privately. They must change it and set up two-factor sign-in on first sign-in.</div>{err(errors, "password")}'
+            f'<div class="hint">Share it privately. They must change it on first sign-in{" and set up two-factor sign-in" if two_fa else ""}.</div>{err(errors, "password")}'
             f'<label>Roles</label>{role_boxes}{err(errors, "roles")}<div style="margin-top:12px"><button class="btn">Add admin</button></div></form></div>')
     return layout(ctx, "admins", "Admin accounts", body, flash)
 

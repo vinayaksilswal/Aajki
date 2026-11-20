@@ -3,11 +3,14 @@
 ## Admin accounts
 
 1. **First Super Admin.** While no admin account exists, sign in at `/admin` with the bootstrap
-   login `ADMIN_USER` / `ADMIN_PASSWORD` from the backend environment. The panel then makes you
-   set up two-factor sign-in with an authenticator app. After this, the bootstrap values sign
-   nobody in, and you can remove `ADMIN_PASSWORD` from the environment.
+   login `ADMIN_USER` / `ADMIN_PASSWORD` from the backend environment. After this, the bootstrap
+   values sign nobody in, and you can remove `ADMIN_PASSWORD` from the environment.
 2. **Everyone else.** In **Admin accounts**, add each person with a temporary password and their
-   roles. On first sign-in they must set up two-factor sign-in and choose a new password.
+   roles. On first sign-in they must choose a new password.
+3. **Two-factor sign-in** is off for now (`ADMIN_REQUIRE_2FA=false`): admins sign in with a
+   username and password, with lockout after 5 wrong attempts. The spec and SOW 3.1.2 require it
+   for every admin, so set `ADMIN_REQUIRE_2FA=true` before public launch; each admin then sets up
+   an authenticator app at their next sign-in.
 
 | Role | Can | Can't |
 |---|---|---|
@@ -88,6 +91,7 @@ production setup: run it again after the move.
 - [ ] Hosting and database in the Mumbai region (DPDP data residency in the spec).
 - [ ] A licensed or editorial news source to replace Google News RSS.
 - [ ] A moderation vendor and object storage, to open photo, video and voice-note attachments.
+- [ ] `ADMIN_REQUIRE_2FA=true` (two-factor sign-in for every admin, SOW 3.1.2).
 - [ ] `SENTRY_DSN` set; alerts routed to the on-call person.
 - [ ] Android shell: Play Integrity check and the native update prompt (`VITE_APP_BUILD`).
 - [ ] Load test passed on the Mumbai staging environment; restore drill done.

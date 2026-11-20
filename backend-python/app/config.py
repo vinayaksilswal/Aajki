@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     admin_user: str = "admin"
     admin_password: str = ""
     admin_session_hours: int = 12
+    # Two-factor sign-in (TOTP) for admins. Off: username and password only. The spec and
+    # SOW 3.1.2 require it for every admin, so turn it on before public launch.
+    admin_require_2fa: bool = False
 
     # Behind a proxy you control that overwrites X-Forwarded-For / X-Real-IP. Always on when
     # running on Vercel (which overwrites them).
