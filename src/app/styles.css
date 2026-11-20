@@ -522,3 +522,9 @@ a.news-item:hover{ color:var(--ink); }
 .update-block{ text-align:center; padding:60px 20px; }
 .update-block h2{ font-size:20px; margin-bottom:8px; }
 .field select, .field textarea{ width:100%; font:inherit; padding:9px 11px; border-radius:10px; border:1px solid var(--border); background:var(--surface); color:var(--ink); }
+
+.sheet-head{ gap:10px; border-bottom:1px solid var(--border); }
+.sheet-head-main{ display:flex; flex-direction:column; gap:6px; min-width:0; }
+.sheet-head-main .chip{ align-self:flex-start; }
+.sheet-title{ font-size:15px; line-height:1.35; margin:0; }
+.sheet-body{ padding-top:12px; }

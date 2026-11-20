@@ -744,9 +744,9 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     const res = def.resolution || {};
     const r = rules();
 
-    let body = '<span class="chip" style="background:color-mix(in srgb, '+cat.color+' 16%, transparent); color:'+cat.color+'; margin-bottom:8px;"><span class="chip-dot"></span>'+cat.label+'</span>'
-      + '<h3 style="font-size:15.5px; margin-top:4px;">'+esc(def.title)+'</h3>'
-      + (def.desc ? '<p style="font-size:12.5px; color:var(--ink-2); line-height:1.55;">'+esc(def.desc)+'</p>' : '')
+    const head = '<span class="chip" style="background:color-mix(in srgb, '+cat.color+' 16%, transparent); color:'+cat.color+';"><span class="chip-dot"></span>'+cat.label+'</span>'
+      + '<h3 class="sheet-title">'+esc(def.title)+'</h3>';
+    let body = (def.desc ? '<p style="font-size:12.5px; color:var(--ink-2); line-height:1.55;">'+esc(def.desc)+'</p>' : '')
       + (def.context && def.context.link ? '<p class="hint">Context: <a href="'+esc(def.context.link)+'" target="_blank" rel="noopener noreferrer">'+esc(def.context.headline)+'</a></p>' : '')
       + chanceBlock(def)
       + '<div class="meta" style="margin-top:4px; display:flex; justify-content:space-between;"><span>'+closesText(def)+'</span><span class="vol">'+callsText(def.participants)+'</span></div>'
@@ -784,13 +784,15 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       }
     }
     body += renderThread(id);
-    return { title: def.title, body };
+    return { title: def.title, head, body };
   }
   function optBtn(key,label,pct_,sel,mine){
     const disabled = !!mine;
     return '<button class="opt-btn '+key+' '+(sel===key?'sel':'')+'" data-opt="'+key+'" '+(disabled?'disabled style="opacity:.6;"':'')+'>'
-      + '<span class="lbl">'+esc(label)+'</span><span class="chance-val">'+(pct_===null?'&mdash;':pct_+'%')+'</span>'
-      + '<span style="font-size:10px; color:var(--ink-muted); font-weight:600;">current chance</span></button>';
+      + '<span class="lbl">'+esc(label)+'</span>'
+      + (pct_===null ? '<span style="font-size:11px; color:var(--ink-muted); font-weight:600;">No calls yet</span>'
+          : '<span class="chance-val">'+pct_+'%</span><span style="font-size:10px; color:var(--ink-muted); font-weight:600;">current chance</span>')
+      + '</button>';
   }
 
   /* ============ my calls / ledger / leaderboard / rewards / profile ============ */
@@ -1028,8 +1030,9 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
       return;
     }
     if(!state.openContest){ backdrop.classList.remove('open'); sheet.classList.remove('open'); sheet.innerHTML=''; return; }
-    const {body} = renderContestSheet(state.openContest);
-    sheet.innerHTML = '<div class="sheet-head"><h3 style="font-size:14px; max-width:80%;">Your call</h3><button class="btn btn-ghost btn-sm" id="btnCloseSheet" aria-label="Close">&#10005;</button></div><div class="sheet-body">'+body+'</div>';
+    const {head, body} = renderContestSheet(state.openContest);
+    sheet.dataset.qid = state.openContest;
+    sheet.innerHTML = '<div class="sheet-head"><div class="sheet-head-main">'+(head || '<h3 class="sheet-title">Your call</h3>')+'</div><button class="btn btn-ghost btn-sm" id="btnCloseSheet" aria-label="Close">&#10005;</button></div><div class="sheet-body">'+body+'</div>';
     backdrop.classList.add('open'); sheet.classList.add('open');
   }
   function renderPhone(){ renderPhoneBody(); renderPhoneNav(); renderSheet(); renderNotifBadge(); }
@@ -1466,11 +1469,12 @@ const BRAND = import.meta.env.BASE_URL + 'brand/';
     const sheetBody = document.querySelector('.sheet-body');
     const scrollTop = phoneBody ? phoneBody.scrollTop : 0;
     const sheetScrollTop = sheetBody ? sheetBody.scrollTop : 0;
+    const sheetWas = document.getElementById('sheet').dataset.qid || null;
     fn();
     const newPhoneBody = document.getElementById('phoneBody');
     if(newPhoneBody) newPhoneBody.scrollTop = scrollTop;
     const newSheetBody = document.querySelector('.sheet-body');
-    if(newSheetBody) newSheetBody.scrollTop = sheetScrollTop;
+    if(newSheetBody) newSheetBody.scrollTop = (sheetWas && sheetWas === state.openContest) ? sheetScrollTop : 0;
     if(id){
       const el = document.getElementById(id);
       if(el && el.tagName==='INPUT'){
