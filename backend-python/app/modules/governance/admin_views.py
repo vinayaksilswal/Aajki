@@ -114,7 +114,7 @@ CSS = """
  input[readonly],textarea[readonly],select[disabled]{opacity:.6} select[multiple]{min-height:140px}
  :root{color-scheme:dark} input::placeholder,textarea::placeholder{color:#6f7785}
  input[type=date],input[type=datetime-local]{cursor:pointer;color:#fff}
- input[type=date]::-webkit-calendar-picker-indicator,input[type=datetime-local]::-webkit-calendar-picker-indicator{filter:invert(1);opacity:1;cursor:pointer;width:20px;height:20px}
+ input[type=date]::-webkit-calendar-picker-indicator,input[type=datetime-local]::-webkit-calendar-picker-indicator{opacity:1;cursor:pointer;width:20px;height:20px}
  textarea{min-height:70px;resize:vertical} label{display:block;font-size:.78rem;color:var(--muted);margin:12px 0 5px;font-weight:600}
  .hint{color:var(--muted);font-size:.74rem;margin-top:4px} .err{color:var(--bad);font-size:.78rem;margin-top:4px;font-weight:600}
  .row{display:grid;grid-template-columns:1fr 1fr;gap:14px} .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
