@@ -57,6 +57,9 @@ PERMISSIONS: dict[str, set[str]] = {
                    "audit.export", "disputes.review", "ops.read"},
 }
 BASE_PERMISSIONS = {"dashboard.read", "questions.read"}
+# The first admin can run the panel alone: every role except Settlement Approver, so results
+# still need a second person to approve them.
+BOOTSTRAP_ROLES = ("super_admin", "content_ops", "settlement_officer", "moderator", "compliance")
 # Separation of settlement duties (SOW 3.1.11): nobody holds both.
 INCOMPATIBLE = [{"settlement_officer", "settlement_approver"}]
 
@@ -122,12 +125,12 @@ def authenticate_password(s: Session, login: str, password: str, ip: str) -> Adm
         if (st.admin_password and hmac.compare_digest(login.encode(), st.admin_user.strip().lower().encode())
                 and hmac.compare_digest(password.encode(), st.admin_password.encode())):
             admin = AdminUser(id=new_id("adm"), email=login, name="Super Admin",
-                              password_hash=hash_password(password), roles=["super_admin"],
+                              password_hash=hash_password(password), roles=list(BOOTSTRAP_ROLES),
                               must_change_password=False)
             s.add(admin)
             s.flush()
             audit(s, None, "admin.bootstrap", "admin", admin.id, None,
-                  {"email": login, "roles": ["super_admin"]}, ip=ip, actor=admin)
+                  {"email": login, "roles": list(BOOTSTRAP_ROLES)}, ip=ip, actor=admin)
             return admin
         raise fail
     admin = s.scalar(select(AdminUser).where(func.lower(AdminUser.email) == login))

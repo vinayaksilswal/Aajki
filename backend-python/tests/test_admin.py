@@ -56,7 +56,8 @@ def test_bootstrap_creates_the_first_super_admin_then_requires_2fa(client, setti
     assert client.get("/admin/dashboard").status_code == 200
     with SessionLocal() as s:
         (a,) = s.scalars(select(AdminUser)).all()
-        assert a.roles == ["super_admin"] and a.totp_enabled
+        assert "super_admin" in a.roles and "content_ops" in a.roles and a.totp_enabled
+        assert "settlement_approver" not in a.roles
         actions = {x.action for x in s.scalars(select(AdminAudit)).all()}
         assert {"admin.bootstrap", "admin.2fa_enrolled"} <= actions
 
